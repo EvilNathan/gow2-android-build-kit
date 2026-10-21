@@ -39,11 +39,42 @@ Android SDK platform 35, NDK 27.3.13750724, CMake 3.30.5.
   alignment `0x4000` (16 KB compatible), sets `extractNativeLibs=true`, is
   debug-signed, and does not package `libwgpu_native.so`.
 
+## Performance update (2026-10-21, APK v1.1 / kit v0.1.1)
+
+The first APK booted on a mid-range phone (8 GB RAM) and reached gameplay,
+but the frame rate was too low to play. Only the outcome was reported; no
+profile numbers were captured. This update targets the present/pacing layer
+and adds instrumentation for the next round:
+
+- Android selects the FIFO surface present mode (frames align with the panel
+  vsync instead of arriving in bursts when a frame finishes early);
+- the frame pacing loop now spins in the final millisecond after a coarse
+  sleep instead of relying on one `SDL_Delay` call with 1-2 ms scheduler
+  slack;
+- on Android the swapchain surface is capped to about 1.4 M pixels (aspect
+  preserved; the compositor upscales), cutting the final blit fill cost
+  several times on 1080p/1440p-class panels;
+- the deinterlace weave (blending the previous display field) moved from a
+  compile-time constant to a runtime switch (initial state from
+  `PS2_NO_DEINTERLACE`), so a weak device can drop the extra blend pass;
+- `PS2_PRESENT_MODE` (immediate/mailbox/fifo) can force the present mode;
+- one logcat line per second with tag `GoW2Stats`: present fps, CPU %, GPU
+  %, RSS, audio queue depth, VU1 interpreter fallback calls per second, plus
+  the chosen adapter and surface size at startup.
+
+Verified for this update: `ps2run` (Release, MSVC/clang-cl) rebuilt cleanly;
+the APK rebuilt with NDK 27.3.13750724 and the same structure checks passed
+(single `lib/arm64-v8a/libmain.so`, LOAD align `0x4000`, `SDL_main` and the
+touch JNI exported). `engine.patch` re-applies to a fresh checkout at
+`6526f4803d98e10de50bea3af104a4d26e9df033` (`git apply --ignore-whitespace`)
+and the tools build from it.
+
 ## Not verified
 
-- **Physical Android device.** No phone or emulator with a Vulkan driver was
-  available here, so the APK has never been launched. Mali-G68/G77 frame rate,
-  thermal behavior, touch latency, and audio latency are unknown.
+- **Performance update on hardware.** The v1.1 APK has not run on the
+  reporter's phone yet. The expected workflow is `adb logcat -d -s
+  GoW2Stats` during play, after which the present-mode/quality knobs can be
+  adjusted against real numbers.
 - **Dynamic resolution.** Only fixed 1x/2x render scaling exists.
 - **Full VU exploration in the clean kit.** The clean-kit workflow was
   validated with `-SkipExplore`; the 78-program VU capture came from the

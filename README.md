@@ -30,8 +30,9 @@ window, audio device, gamepads, and lifecycle handling.
 | Android APK build (`assembleDebug`) | ✅ passing (13.5 MB, arm64-v8a) |
 | 16 KB page compatibility | ✅ `LOAD` align `0x4000`, `extractNativeLibs=true` |
 | Memory-card save/load | ⚠️ implemented, in-game save not yet exercised |
-| Physical device launch | ❌ no device/Vulkan adapter available during development |
-| Mali-G68/G77 30 fps target | ❌ unverified |
+| First device run (mid-range phone, 8 GB RAM) | ⚠️ booted to gameplay, but too slow to play on v1.0 |
+| Performance update v1.1 (FIFO present, tuned pacing, Android surface cap, runtime deinterlace switch, logcat stats) | ✅ shipped, device re-test pending |
+| Mali-G68/G77 30 fps target | ❌ not yet measured on hardware |
 | Dynamic resolution | ❌ not implemented |
 
 ## Port progress
@@ -50,12 +51,12 @@ Percentages are honest status, not a compatibility promise.
 | Audio: SPU2 output path | 100% | Non-silent stereo capture verified |
 | Audio: 989SND bank coverage | 40% | WAD-backed audio works; `sound/*.bnk` requests unserved |
 | Game compatibility breadth | 60% | Boots into the opening chapter; full game unverified |
-| Performance tuning | 35% | 1x target, no device metrics, no dynamic resolution |
+| Performance tuning | 45% | Pacing/present work shipped; no device metrics yet, no dynamic resolution |
 | Docs, packaging, legal | 100% | Kit, notices, release, verification log |
 
-**Overall: ~80% engineering complete; ~0% hardware validation** (no physical
-device was available, so nothing is claimed about real-device frame rate,
-touch latency, audio latency, or thermals).
+**Overall: ~82% engineering complete; hardware validation ~5%** (one phone
+reached gameplay but the v1.0 frame rate was too low; the v1.1 performance
+update awaits a re-test with `adb logcat -d -s GoW2Stats` numbers).
 
 ## Important files
 
@@ -264,11 +265,17 @@ the APK's compressed ZIP entries to be 16 KB aligned.
    was verified to produce non-silent stereo output during the intro (audio from
    WAD sample groups), but bank-driven music, voice, and some effects can be
    missing. This is the main compatibility item left.
-2. **Performance validation.** There was no physical Android device or local
-   Vulkan adapter in the build environment. The APK's runtime behavior and Mali
-   performance are unverified.
-3. **Dynamic resolution.** The app exposes fixed 1x/2x scaling. It does not
-   change scale dynamically based on frame time.
+2. **Performance.** The first device run (mid-range phone, 8 GB RAM) rendered
+   the game but at an unplayable frame rate on v1.0. v1.1 tunes the Android
+   present path (FIFO vsync cadence, sub-millisecond pacing, a ~1.4 M-pixel
+   Android swapchain cap with compositor upscaling, and a runtime deinterlace
+   switch to cut the final blend pass) and logs `fps / CPU / GPU / RAM /
+   audio / VU-interpreter` stats to logcat once per second (`adb logcat -d -s
+   GoW2Stats`). Numbers from real hardware are still needed to go further; if
+   `Vuint` in that line is high, more VU1 programs are missing from the AOT
+   capture and the interpreter is the bottleneck.
+3. **Dynamic resolution.** The app exposes fixed 1x/2x scaling (2x quadruples
+   the GPU cost - stay on 1x). It does not change scale automatically.
 4. **Region/version.** Only the USA DVD9 `SCUS_974.81` image was tested. PAL and
    other revisions are not supported by this kit.
 5. **Release signing.** `build-android.ps1` produces a debug-signed APK. For

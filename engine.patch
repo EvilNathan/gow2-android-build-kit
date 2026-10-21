@@ -289,10 +289,10 @@ index 9e5e1e4..2ac837d 100644
      };
  #ifdef PS2_WINDOW
 diff --git a/host/window.cpp b/host/window.cpp
-index 8289130..5e95354 100644
+index 8289130..fa655ce 100644
 --- a/host/window.cpp
 +++ b/host/window.cpp
-@@ -2,8 +2,7 @@
+@@ -2,16 +2,19 @@
  
  #include "ps2/system.hpp"
  
@@ -301,8 +301,12 @@ index 8289130..5e95354 100644
 +#include <SDL3/SDL.h>
  #include <sys/resource.h>
  #include <unistd.h>
++#ifdef __ANDROID__
++#include <android/log.h>
++#endif
  
-@@ -12,6 +11,7 @@
+ #include <algorithm>
+ #include <atomic>
  #include <cmath>
  #include <cstdio>
  #include <cstdlib>
@@ -310,7 +314,7 @@ index 8289130..5e95354 100644
  #include <thread>
  #include <vector>
  
-@@ -38,34 +38,93 @@ constexpr KeyBinding kKeys[] = {
+@@ -38,34 +41,93 @@ constexpr KeyBinding kKeys[] = {
  };
  
  struct PadBinding {
@@ -417,7 +421,7 @@ index 8289130..5e95354 100644
      if (!g_renderer) {
          std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
          return false;
-@@ -75,71 +134,72 @@ bool create_renderer() {
+@@ -75,71 +137,72 @@ bool create_renderer() {
  
  bool attach_gpu() {
      if (std::getenv("PS2_SDL_RENDERER")) return false;
@@ -520,7 +524,7 @@ index 8289130..5e95354 100644
      if (port > 0 && plugged[port] != (pad != nullptr)) {
          plugged[port] = pad != nullptr;
          ps2::set_pad_connected(port, plugged[port]);
-@@ -148,29 +208,34 @@ void poll_port(int port) {
+@@ -148,29 +211,34 @@ void poll_port(int port) {
      std::uint8_t l2 = 0xFF, r2 = 0xFF;
      std::uint8_t lx = 0x80, ly = 0x80, rx = 0x80, ry = 0x80;
      if (port == 0) {
@@ -565,7 +569,7 @@ index 8289130..5e95354 100644
      }
      rumble(port);
      static std::uint64_t last[2] = {~0ull, ~0ull};
-@@ -187,27 +252,65 @@ void poll_port(int port) {
+@@ -187,27 +255,65 @@ void poll_port(int port) {
      ps2::set_pad_axis(3, ly, port);
  }
  
@@ -588,13 +592,13 @@ index 8289130..5e95354 100644
 +        if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
 +            g_paused.store(false);
 +            g_last = 0;
-         }
--        if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED && g_gpu_present) {
++        }
 +        if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
 +            const bool full = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) != 0;
 +            SDL_SetWindowFullscreen(g_window, !full);
 +            if (full) SDL_ShowCursor(); else SDL_HideCursor();
-+        }
+         }
+-        if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED && g_gpu_present) {
 +        if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && g_gpu_present) {
              int w = 0, h = 0;
              SDL_GetWindowSizeInPixels(g_window, &w, &h);
@@ -642,7 +646,7 @@ index 8289130..5e95354 100644
      }
      poll_port(0);
      poll_port(1);
-@@ -217,13 +320,13 @@ void show_pixels(const std::uint32_t *rgba, std::uint32_t w, std::uint32_t h) {
+@@ -217,13 +323,13 @@ void show_pixels(const std::uint32_t *rgba, std::uint32_t w, std::uint32_t h) {
      if (w != g_tex_w || h != g_tex_h) {
          if (g_texture) SDL_DestroyTexture(g_texture);
          g_texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, static_cast<int>(w), static_cast<int>(h));
@@ -658,7 +662,7 @@ index 8289130..5e95354 100644
      SDL_RenderPresent(g_renderer);
  }
  
-@@ -239,10 +342,11 @@ void present() {
+@@ -239,16 +345,23 @@ void present() {
  constexpr Uint32 kAudioBytesPerMs = 48 * 4;
  
  void pace() {
@@ -673,16 +677,62 @@ index 8289130..5e95354 100644
      }
      const std::uint64_t frequency = SDL_GetPerformanceFrequency();
      const std::uint64_t period = frequency / (ps2::g_options.pal ? 50 : 60);
-@@ -284,7 +388,7 @@ void show_speed() {
+     const std::uint64_t now = SDL_GetPerformanceCounter();
+     if (g_last && now - g_last < period) {
+-        SDL_Delay(static_cast<Uint32>((period - (now - g_last)) * 1000 / frequency));
++        // Coarse sleep first, then spin the last millisecond: SDL_Delay has a
++        // 1-2 ms slack on many schedulers, and	SDL's audio cadence plus the
++        // vblank grid work best when the sleep error stays well under a frame.
++        const std::uint64_t remain = period - (now - g_last);
++        const std::uint64_t spin_window = frequency / 1000;
++        if (remain > spin_window * 2) SDL_DelayNS((remain - spin_window) * 1000000000ull / frequency);
++        while (SDL_GetPerformanceCounter() - now < remain) {}
+         g_last += period;
+     } else {
+         g_last = now;
+@@ -271,27 +384,37 @@ double resident_mb() {
+ }
+ 
+ void show_speed() {
+-    static std::uint64_t start = 0, frames = 0;
++    static std::uint64_t start = 0, frames = 0, vu_calls = 0;
+     static double cpu_start = 0.0, gpu_start = 0.0;
+     const std::uint64_t now = SDL_GetPerformanceCounter();
+     if (!start) {
+         start = now;
+         cpu_start = process_cpu_seconds();
+         gpu_start = ps2::gpu_busy_ms();
++        vu_calls = ps2::vu1_interpreted_calls();
+     }
+     ++frames;
+     const double seconds = static_cast<double>(now - start) / static_cast<double>(SDL_GetPerformanceFrequency());
      if (seconds < 1.0) return;
      const double cpu = process_cpu_seconds(), gpu = ps2::gpu_busy_ms();
++    const std::uint64_t vu_now = ps2::vu1_interpreted_calls();
      char title[192];
 -    const double queued = g_audio ? SDL_GetQueuedAudioSize(g_audio) / static_cast<double>(kAudioBytesPerMs) : 0.0;
+-    std::snprintf(title, sizeof title, "ps2-web-recomp  %.1f fps  CPU %.0f%%  GPU %.0f%%  RAM %.0f MB  audio %.0f ms", static_cast<double>(frames) / seconds,
+-                  (cpu - cpu_start) / seconds * 100.0, (gpu - gpu_start) / (seconds * 10.0), resident_mb(), queued);
 +    const double queued = g_audio ? SDL_GetAudioStreamQueued(g_audio) / static_cast<double>(kAudioBytesPerMs) : 0.0;
-     std::snprintf(title, sizeof title, "ps2-web-recomp  %.1f fps  CPU %.0f%%  GPU %.0f%%  RAM %.0f MB  audio %.0f ms", static_cast<double>(frames) / seconds,
-                   (cpu - cpu_start) / seconds * 100.0, (gpu - gpu_start) / (seconds * 10.0), resident_mb(), queued);
++    std::snprintf(title, sizeof title, "ps2-web-recomp  %.1f fps  CPU %.0f%%  GPU %.0f%%  RAM %.0f MB  audio %.0f ms  Vuint %llu/s",
++                  static_cast<double>(frames) / seconds, (cpu - cpu_start) / seconds * 100.0,
++                  (gpu - gpu_start) / (seconds * 10.0), resident_mb(), queued,
++                  static_cast<unsigned long long>(vu_now - vu_calls));
++#ifdef __ANDROID__
++    // The window title is invisible on a phone; logcat carries the stats.
++    __android_log_print(ANDROID_LOG_INFO, "GoW2Stats", "%s", title);
++#else
      SDL_SetWindowTitle(g_window, title);
-@@ -302,37 +406,56 @@ void on_vblank() {
++#endif
+     start = now;
+     frames = 0;
+     cpu_start = cpu;
+     gpu_start = gpu;
++    vu_calls = vu_now;
+ }
+ 
+ void on_vblank() {
+@@ -302,44 +425,71 @@ void on_vblank() {
  }
  
  void queue_audio(const std::int16_t *samples, std::size_t frames) {
@@ -754,6 +804,22 @@ index 8289130..5e95354 100644
      return true;
  }
  
+ int run_window(const std::function<int()> &emulate) {
+     ps2::init_graphics();
+     g_gpu_present = attach_gpu();
+-    std::fprintf(stderr, "[window] %s\n", g_gpu_present ? "presenting through WebGPU" : "presenting through SDL");
++    const char *mode = g_gpu_present ? "presenting through WebGPU" : "presenting through SDL";
++    std::fprintf(stderr, "[window] %s\n", mode);
++#ifdef __ANDROID__
++    {
++        int w = 0, h = 0;
++        SDL_GetWindowSizeInPixels(g_window, &w, &h);
++        __android_log_print(ANDROID_LOG_INFO, "GoW2Stats", "[window] %s, surface %dx%d", mode, w, h);
++    }
++#endif
+     if (!g_gpu_present && !create_renderer()) return 1;
+     const bool threads = !std::getenv("PS2_ONE_THREAD") && !std::getenv("PS2_TIME") && ps2::g_options.frames_dir.empty();
+     if (!threads) {
 diff --git a/host/window.hpp b/host/window.hpp
 index 3174ae9..3c93f22 100644
 --- a/host/window.hpp
@@ -784,7 +850,7 @@ index 0f1af64..c5600bb 100644
  bool read(std::uint32_t sector, std::uint32_t count, void *out);
  bool ready(std::uint32_t sector, std::uint32_t count);
 diff --git a/runtime/include/ps2/system.hpp b/runtime/include/ps2/system.hpp
-index d794aee..65e74dc 100644
+index d794aee..49ad7be 100644
 --- a/runtime/include/ps2/system.hpp
 +++ b/runtime/include/ps2/system.hpp
 @@ -101,7 +101,7 @@ std::uint64_t frame_count();
@@ -796,6 +862,18 @@ index d794aee..65e74dc 100644
      void *display = nullptr;
      std::uint64_t window = 0;
      void *surface = nullptr;
+@@ -131,6 +131,11 @@ bool parse_axis(const std::string &spec, AxisPress &press);
+ bool load_patches(const std::string &path);
+ double gpu_busy_ms();
+ void browser_yield();
++// GS deinterlace weave: the runtime blends the previous display field into the
++// current frame. PS2_NO_DEINTERLACE sets the initial state; the switch is
++// runtime-adjustable so a weak device can drop the blend while playing.
++bool no_deinterlace();
++void set_no_deinterlace(bool disabled);
+ std::uint64_t frames_run();
+ std::uint64_t primitives_drawn();
+ // pad 0 is the first controller port, pad 1 the second, which starts unplugged
 diff --git a/runtime/src/disc.cpp b/runtime/src/disc.cpp
 index 4491f35..1f58bfb 100644
 --- a/runtime/src/disc.cpp
@@ -845,10 +923,53 @@ index 4491f35..1f58bfb 100644
      g_reader = std::move(reader);
      g_probe = std::move(probe);
 diff --git a/runtime/src/gs/gpu/gpu.cpp b/runtime/src/gs/gpu/gpu.cpp
-index dc1f3b2..14693e4 100644
+index dc1f3b2..035f684 100644
 --- a/runtime/src/gs/gpu/gpu.cpp
 +++ b/runtime/src/gs/gpu/gpu.cpp
-@@ -1640,6 +1640,7 @@ bool attach_surface(const SurfaceTarget &target) {
+@@ -16,6 +16,9 @@
+ #include <memory>
+ #include <string>
+ #include <unordered_map>
++#ifdef __ANDROID__
++#include <android/log.h>
++#endif
+ 
+ extern const char kGsShader[];
+ extern const char kBlitShader[];
+@@ -179,6 +182,20 @@ std::vector<std::uint32_t> g_touched;
+ 
+ WGPUStringView view(const char *s) { return WGPUStringView{s, WGPU_STRLEN}; }
+ 
++// Android swapchains are the size of the phone's panel, which can be far
++// larger than anything the PS2 drew. The final blit cost per fragment is tiny,
++// but filling a 2.6 M-pixel surface still binds the GPU between the compute
++// passes and the compositor, and drivers upsasize the swapchain automatically,
++// so keep the surface close to 1080p and let scaling happen after present.
++void capped_surface_size(std::uint32_t &w, std::uint32_t &h) {
++    constexpr std::uint64_t kMaxArea = 1400000ull;
++    const std::uint64_t area = static_cast<std::uint64_t>(w) * h;
++    if (!w || !h || area <= kMaxArea) return;
++    const double factor = std::sqrt(static_cast<double>(kMaxArea) / static_cast<double>(area));
++    w = std::max(2u, static_cast<std::uint32_t>(w * factor));
++    h = std::max(2u, static_cast<std::uint32_t>(h * factor));
++}
++
+ std::uint32_t bits_per_pixel(std::uint32_t psm) {
+     switch (psm) {
+     case PSMCT24: case PSMZ24: return 24;
+@@ -1130,7 +1147,10 @@ bool init(Mode m) {
+     }
+     WGPUAdapterInfo info = WGPU_ADAPTER_INFO_INIT;
+     if (wgpuAdapterGetInfo(adapter, &info) == WGPUStatus_Success) {
+-        std::fprintf(stderr, "[gpu] %.*s (%.*s)\n", static_cast<int>(info.device.length), info.device.data, static_cast<int>(info.description.length), info.description.data);
++        std::fprintf(stderr, "[gpu] %.*s (%.*s)\n", static_cast<int>(info.device.length), info.device.length ? info.device.data : "", static_cast<int>(info.description.length), info.description.length ? info.description.data : "");
++#ifdef __ANDROID__
++        __android_log_print(ANDROID_LOG_INFO, "GoW2Stats", "[gpu] %.*s (%.*s)", static_cast<int>(info.device.length), info.device.length ? info.device.data : "", static_cast<int>(info.description.length), info.description.length ? info.description.data : "");
++#endif
+         wgpuAdapterInfoFreeMembers(info);
+     }
+     WGPULimits supported = WGPU_LIMITS_INIT;
+@@ -1640,6 +1660,7 @@ bool attach_surface(const SurfaceTarget &target) {
  #else
      WGPUSurfaceSourceXlibWindow xlib = WGPU_SURFACE_SOURCE_XLIB_WINDOW_INIT;
      WGPUSurfaceSourceWaylandSurface wayland = WGPU_SURFACE_SOURCE_WAYLAND_SURFACE_INIT;
@@ -856,7 +977,7 @@ index dc1f3b2..14693e4 100644
      if (target.kind == SurfaceTarget::X11) {
          xlib.display = target.display;
          xlib.window = target.window;
-@@ -1648,6 +1649,9 @@ bool attach_surface(const SurfaceTarget &target) {
+@@ -1648,6 +1669,9 @@ bool attach_surface(const SurfaceTarget &target) {
          wayland.display = target.display;
          wayland.surface = target.surface;
          sd.nextInChain = &wayland.chain;
@@ -866,6 +987,57 @@ index dc1f3b2..14693e4 100644
      } else {
          return false;
      }
+@@ -1666,13 +1690,27 @@ bool attach_surface(const SurfaceTarget &target) {
+             g_surface_format = caps.formats[i];
+             break;
+         }
++    // Frames the runtime submits are already paced by the host loop, so the
++    // panel-rate FIFO queue gives the smoothest cadence on Android. Immediate
++    // showing produces bursts whenever a frame finishes early. Desktop keeps
++    // the older behavior; PS2_PRESENT_MODE overrides everywhere.
+     g_present_mode = WGPUPresentMode_Fifo;
++    if (const char *mode = std::getenv("PS2_PRESENT_MODE")) {
++        if (!std::strcmp(mode, "immediate")) g_present_mode = WGPUPresentMode_Immediate;
++        else if (!std::strcmp(mode, "mailbox")) g_present_mode = WGPUPresentMode_Mailbox;
++        else if (!std::strcmp(mode, "fifo")) g_present_mode = WGPUPresentMode_Fifo;
++    }
++#ifndef __ANDROID__
+     for (const WGPUPresentMode wanted : {WGPUPresentMode_Immediate, WGPUPresentMode_Mailbox})
+         for (std::size_t i = 0; i < caps.presentModeCount; ++i)
+             if (caps.presentModes[i] == wanted) g_present_mode = wanted;
++#endif
+     wgpuSurfaceCapabilitiesFreeMembers(caps);
+     g_surface_width = target.width;
+     g_surface_height = target.height;
++#ifdef __ANDROID__
++    capped_surface_size(g_surface_width, g_surface_height);
++#endif
+     configure_surface();
+ 
+     WGPUShaderSourceWGSL source = WGPU_SHADER_SOURCE_WGSL_INIT;
+@@ -1728,7 +1766,11 @@ bool attach_surface(const SurfaceTarget &target) {
+ }
+ 
+ void resize_surface(std::uint32_t width, std::uint32_t height) {
+-    if (!g_surface || (width == g_surface_width && height == g_surface_height)) return;
++    if (!g_surface) return;
++#ifdef __ANDROID__
++    capped_surface_size(width, height);
++#endif
++    if (width == g_surface_width && height == g_surface_height) return;
+     g_surface_width = width;
+     g_surface_height = height;
+     configure_surface();
+@@ -1740,8 +1782,7 @@ bool present(const DisplaySource &src) {
+     if (!g_surface) return false;
+     flush_all();
+     const std::uint32_t current = field_base(g_field), previous = field_base(g_field + 1);
+-    static const bool weave_off = std::getenv("PS2_NO_DEINTERLACE") != nullptr;
+-    const bool blend = src.halved && g_have_previous && g_last_width == src.width && g_last_height == src.height && !weave_off;
++    const bool blend = src.halved && g_have_previous && g_last_width == src.width && g_last_height == src.height && !ps2::no_deinterlace();
+     const std::uint32_t param = push_params({src.fbp, src.fbw, src.psm, src.dbx, src.dby, src.width, src.height, src.halved ? 1u : 0u, current});
+     g_commands.push_back({kDisplay, (src.width * g_scale + 7) / 8, (src.height * g_scale + 7) / 8, param});
+     const float sw = static_cast<float>(g_surface_width), sh = static_cast<float>(g_surface_height);
 diff --git a/runtime/src/gs/gpu/gpu.hpp b/runtime/src/gs/gpu/gpu.hpp
 index 2f09e51..328b6f6 100644
 --- a/runtime/src/gs/gpu/gpu.hpp
@@ -879,6 +1051,36 @@ index 2f09e51..328b6f6 100644
      void *display;
      std::uint64_t window;
      void *surface;
+diff --git a/runtime/src/gs/gs.cpp b/runtime/src/gs/gs.cpp
+index 907e575..5720918 100644
+--- a/runtime/src/gs/gs.cpp
++++ b/runtime/src/gs/gs.cpp
+@@ -22,6 +22,15 @@
+ #include <cstring>
+ #include <vector>
+ 
++namespace ps2 {
++namespace {
++std::atomic<bool> g_weave_off{std::getenv("PS2_NO_DEINTERLACE") != nullptr};
++}
++
++bool no_deinterlace() { return g_weave_off.load(std::memory_order_relaxed); }
++void set_no_deinterlace(bool disabled) { g_weave_off.store(disabled, std::memory_order_relaxed); }
++}
++
+ namespace ps2::gs {
+ 
+ State g_state;
+@@ -946,8 +955,7 @@ bool copy_frame(const DisplayRegs &r, std::vector<std::uint32_t> &rgba, std::uin
+         previous = rgba;
+         return true;
+     }
+-    static const bool weave_off = std::getenv("PS2_NO_DEINTERLACE") != nullptr;
+-    const bool blend = (r.smode2 & 3u) == 3u && !weave_off;
++    const bool blend = (r.smode2 & 3u) == 3u && !no_deinterlace();
+     for (std::size_t i = 0; i < rgba.size(); ++i) {
+         const std::uint32_t c = rgba[i];
+         if (blend) rgba[i] = (c & previous[i]) + (((c ^ previous[i]) & 0xFEFEFEFEu) >> 1);
 diff --git a/runtime/src/iop/cdvd.cpp b/runtime/src/iop/cdvd.cpp
 index 218cbda..5950b22 100644
 --- a/runtime/src/iop/cdvd.cpp
