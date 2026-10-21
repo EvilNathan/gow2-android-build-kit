@@ -1,0 +1,24 @@
+# Never commit game-derived material.
+engine/
+generated/
+games/
+build/
+dist/
+*.iso
+*.ELF
+*.elf
+*.ps2
+
+# Android/Gradle local state.
+android/.gradle/
+android/local.properties
+android/app/build/
+android/.cxx/
+android/captures/
+.android/
+.local/
+
+# Build-kit outputs.
+*.apk
+*.aab
+*.zip

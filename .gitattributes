@@ -1,0 +1,20 @@
+# Keep the engine patch byte-stable on every platform; git apply depends on it.
+engine.patch text eol=lf
+
+# Windows batch files need CRLF.
+*.bat text eol=crlf
+
+# Shell scripts need LF even on Windows checkouts.
+gradlew text eol=lf
+*.sh text eol=lf
+
+# Sources and scripts work with LF everywhere, including Windows PowerShell 5.1.
+*.ps1 text eol=lf
+*.py text eol=lf
+*.java text eol=lf
+*.c text eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.xml text eol=lf

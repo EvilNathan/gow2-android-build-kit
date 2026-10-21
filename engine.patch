@@ -1,0 +1,1065 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 20f54f1..ac3dc59 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -11,7 +11,7 @@ if(EMSCRIPTEN)
+     add_link_options(-msimd128 -mtail-call -fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0 -pthread)
+ endif()
+ 
+-if(NOT EMSCRIPTEN)
++if(NOT EMSCRIPTEN AND NOT ANDROID)
+     add_executable(eerecomp
+         recomp/main.cpp
+         recomp/r5900.cpp
+@@ -59,15 +59,20 @@ add_library(ps2runtime STATIC
+ target_include_directories(ps2runtime PUBLIC runtime/include)
+ target_compile_options(ps2runtime PRIVATE -Wall -Wextra)
+ 
+-set(PS2_WGPU_DIR "${CMAKE_SOURCE_DIR}/third_party/wgpu-native" CACHE PATH "wgpu-native release folder")
++if(ANDROID)
++    set(PS2_WGPU_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/wgpu-native-android")
++else()
++    set(PS2_WGPU_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/wgpu-native")
++endif()
++set(PS2_WGPU_DIR "${PS2_WGPU_DEFAULT}" CACHE PATH "wgpu-native release folder")
+ if(EMSCRIPTEN OR EXISTS "${PS2_WGPU_DIR}/lib/libwgpu_native.a")
+     set(PS2_GS_WGSL "${CMAKE_BINARY_DIR}/gs_wgsl.cpp")
+     add_custom_command(OUTPUT "${PS2_GS_WGSL}"
+-        COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR}/runtime/src/gs/gpu/gs.wgsl -DOUT=${PS2_GS_WGSL} -DNAME=kGsShader -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
++        COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/runtime/src/gs/gpu/gs.wgsl -DOUT=${PS2_GS_WGSL} -DNAME=kGsShader -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake
+         DEPENDS runtime/src/gs/gpu/gs.wgsl cmake/embed.cmake)
+     set(PS2_BLIT_WGSL "${CMAKE_BINARY_DIR}/blit_wgsl.cpp")
+     add_custom_command(OUTPUT "${PS2_BLIT_WGSL}"
+-        COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR}/runtime/src/gs/gpu/blit.wgsl -DOUT=${PS2_BLIT_WGSL} -DNAME=kBlitShader -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
++        COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/runtime/src/gs/gpu/blit.wgsl -DOUT=${PS2_BLIT_WGSL} -DNAME=kBlitShader -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake
+         DEPENDS runtime/src/gs/gpu/blit.wgsl cmake/embed.cmake)
+     target_sources(ps2runtime PRIVATE runtime/src/gs/gpu/gpu.cpp "${PS2_GS_WGSL}" "${PS2_BLIT_WGSL}")
+     target_compile_definitions(ps2runtime PUBLIC PS2_GPU)
+@@ -76,7 +81,11 @@ if(EMSCRIPTEN OR EXISTS "${PS2_WGPU_DIR}/lib/libwgpu_native.a")
+         target_link_options(ps2runtime PUBLIC --use-port=emdawnwebgpu)
+     else()
+         target_include_directories(ps2runtime PRIVATE "${PS2_WGPU_DIR}/include")
+-        target_link_libraries(ps2runtime PUBLIC "${PS2_WGPU_DIR}/lib/libwgpu_native.a" dl pthread m)
++        if(ANDROID)
++            target_link_libraries(ps2runtime PUBLIC "${PS2_WGPU_DIR}/lib/libwgpu_native.a" android log vulkan)
++        else()
++            target_link_libraries(ps2runtime PUBLIC "${PS2_WGPU_DIR}/lib/libwgpu_native.a" dl pthread m)
++        endif()
+         if(APPLE)
+             target_link_libraries(ps2runtime PUBLIC "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework CoreFoundation" "-framework IOKit" "-framework IOSurface" objc)
+         endif()
+@@ -105,21 +114,29 @@ if(PS2_GENERATED)
+         target_link_options(ps2web PRIVATE --profiling-funcs -sJSPI -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=268435456 -sPTHREAD_POOL_SIZE=2 -sALLOW_TABLE_GROWTH=1 -lidbfs.js -sSTACK_SIZE=16777216 -sENVIRONMENT=web
+             -sEXPORTED_FUNCTIONS=_main,_ps2web_pad,_ps2web_pad_connected,_ps2web_resize,_ps2web_gpu_ms,_ps2web_frames,_ps2web_primitives,_ps2web_audio_ring,_ps2web_audio_queued_ms,_ps2web_idle_ms,_ps2web_vu_interpreted
+             -sEXPORTED_RUNTIME_METHODS=callMain,addRunDependency,removeRunDependency,HEAPU8,ENV
+-            --shell-file ${CMAKE_SOURCE_DIR}/web/shell.html --preload-file ${PS2_WEB_ELF}@/game/core.elf)
+-        set_target_properties(ps2web PROPERTIES SUFFIX ".html" LINK_DEPENDS ${CMAKE_SOURCE_DIR}/web/shell.html)
++            --shell-file ${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html --preload-file ${PS2_WEB_ELF}@/game/core.elf)
++        set_target_properties(ps2web PROPERTIES SUFFIX ".html" LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html)
+         return()
+     endif()
+ 
+-    add_executable(ps2run host/main.cpp)
+-    target_link_libraries(ps2run PRIVATE ps2game ps2runtime)
+-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+-        target_sources(ps2run PRIVATE host/profile.cpp)
+-        target_compile_definitions(ps2run PRIVATE PS2_PROFILE)
+-    endif()
+-    find_package(SDL2 QUIET)
+-    if(SDL2_FOUND AND NOT EMSCRIPTEN)
+-        target_sources(ps2run PRIVATE host/window.cpp)
+-        target_compile_definitions(ps2run PRIVATE PS2_WINDOW)
+-        target_link_libraries(ps2run PRIVATE SDL2::SDL2)
++    if(ANDROID)
++        # SDLActivity loads libmain.so and calls SDL_main().
++        add_library(main SHARED host/main.cpp host/window.cpp host/android_jni.cpp)
++        target_compile_definitions(main PRIVATE PS2_WINDOW)
++        target_link_libraries(main PRIVATE ps2game ps2runtime SDL3::SDL3 android log)
++    else()
++        # The desktop runner may still use the SDL3 window when it is installed.
++        find_package(SDL3 QUIET)
++        add_executable(ps2run host/main.cpp)
++        target_link_libraries(ps2run PRIVATE ps2game ps2runtime)
++        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
++            target_sources(ps2run PRIVATE host/profile.cpp)
++            target_compile_definitions(ps2run PRIVATE PS2_PROFILE)
++        endif()
++        if(TARGET SDL3::SDL3 AND NOT EMSCRIPTEN)
++            target_sources(ps2run PRIVATE host/window.cpp)
++            target_compile_definitions(ps2run PRIVATE PS2_WINDOW)
++            target_link_libraries(ps2run PRIVATE SDL3::SDL3)
++        endif()
+     endif()
+ endif()
+diff --git a/host/android_jni.cpp b/host/android_jni.cpp
+new file mode 100644
+index 0000000..59d60a7
+--- /dev/null
++++ b/host/android_jni.cpp
+@@ -0,0 +1,13 @@
++#include "window.hpp"
++
++#include <jni.h>
++
++extern "C" JNIEXPORT void JNICALL
++Java_com_gow2_android_TouchOverlayView_nativeSetPad(JNIEnv *, jclass, jint buttons,
++                                                     jint lx, jint ly, jint rx, jint ry) {
++    set_virtual_pad(static_cast<std::uint16_t>(buttons),
++                    static_cast<std::uint8_t>(lx),
++                    static_cast<std::uint8_t>(ly),
++                    static_cast<std::uint8_t>(rx),
++                    static_cast<std::uint8_t>(ry));
++}
+diff --git a/host/main.cpp b/host/main.cpp
+index 9e5e1e4..2ac837d 100644
+--- a/host/main.cpp
++++ b/host/main.cpp
+@@ -1,5 +1,10 @@
++#include "ps2/disc.hpp"
+ #include "ps2/system.hpp"
+ 
++#ifdef __ANDROID__
++#include <SDL3/SDL_main.h>
++#endif
++
+ #ifdef PS2_WINDOW
+ #include "window.hpp"
+ #endif
+@@ -7,6 +12,7 @@
+ #include "profile.hpp"
+ #endif
+ 
++#include <algorithm>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+@@ -18,13 +24,59 @@ void register_generated_vu();
+ 
+ namespace {
+ 
++std::string g_data_dir;
++
++// The generated code still needs the game's original ELF in memory at boot.
++// Pull it out of the user's ISO once, next to the app's save data.
++bool extract_elf(const std::string &path) {
++    auto entry = ps2::disc::find("SCUS_974.81");
++    if (!entry || entry->directory) {
++        std::fprintf(stderr, "[android] SCUS_974.81 not found in ISO\n");
++        return false;
++    }
++    if (std::FILE *existing = std::fopen(path.c_str(), "rb")) {
++        std::fseek(existing, 0, SEEK_END);
++        const long size = std::ftell(existing);
++        std::fclose(existing);
++        if (size == static_cast<long>(entry->size)) return true;
++    }
++    const std::string tmp = path + ".tmp";
++    std::FILE *out = std::fopen(tmp.c_str(), "wb");
++    if (!out) {
++        std::fprintf(stderr, "[android] cannot create %s\n", tmp.c_str());
++        return false;
++    }
++    std::vector<std::uint8_t> buffer(128 * ps2::disc::kSector);
++    std::uint32_t sector = entry->sector;
++    std::uint32_t remaining = entry->size;
++    bool ok = true;
++    while (remaining) {
++        const std::uint32_t sectors = (remaining + ps2::disc::kSector - 1) / ps2::disc::kSector;
++        const std::uint32_t count = std::min<std::uint32_t>(sectors, 128);
++        const std::uint32_t bytes = std::min<std::uint32_t>(remaining, count * ps2::disc::kSector);
++        if (!ps2::disc::read(sector, count, buffer.data())) { ok = false; break; }
++        if (std::fwrite(buffer.data(), 1, bytes, out) != bytes) { ok = false; break; }
++        sector += count;
++        remaining -= bytes;
++    }
++    std::fclose(out);
++    if (ok) {
++        std::remove(path.c_str());
++        if (std::rename(tmp.c_str(), path.c_str()) != 0) ok = false;
++    }
++    if (!ok) std::remove(tmp.c_str());
++    std::fprintf(stderr, "[android] extracted ELF: %s (%u bytes)\n", ok ? "ok" : "failed", entry->size);
++    return ok;
++}
++
+ int usage() {
+     std::fprintf(stderr,
+                  "usage: ps2run <elf> [--arg text]... [--frames n] [--ntsc] [--misses file]\n"
+                  "              [--disc image.iso] [--memcard card.ps2] [--pal | --ntsc] [--trace-syscalls] [--trace-io] [--trace-threads]\n"
+                  "              [--trace-iop] [--trace-iop-hle] [--frames-dir dir] [--frame-every n]\n"
+                  "              [--press frame:button[+button][:frames]]... [--window] [--fullscreen]\n"
+-                 "              [--save-state frame:file] [--load-state file] [--widescreen] [--patches file]\n");
++                 "              [--save-state frame:file] [--load-state file] [--widescreen] [--patches file]\n"
++                 "              [--audio-out stereo_s16le.pcm]\n");
+     return 2;
+ }
+ 
+@@ -35,6 +87,10 @@ int main(int argc, char **argv) {
+     std::vector<std::string> args{argv[1]};
+     [[maybe_unused]] bool window = false, fullscreen = false;
+     std::string load_path;
++    std::string audio_out;
++    int iso_fd = -1;
++    std::uint64_t iso_size = 0;
++    std::string elf_path = argv[1];
+     for (int i = 2; i < argc; ++i) {
+         const std::string a = argv[i];
+         if (a == "--arg" && i + 1 < argc) args.push_back(argv[++i]);
+@@ -52,6 +108,9 @@ int main(int argc, char **argv) {
+         else if (a == "--trace-io") ps2::g_options.trace_io = true;
+         else if (a == "--trace-threads") ps2::g_options.trace_threads = true;
+         else if (a == "--disc" && i + 1 < argc) ps2::g_options.disc_path = argv[++i];
++        else if (a == "--iso-fd" && i + 1 < argc) iso_fd = static_cast<int>(std::strtol(argv[++i], nullptr, 10));
++        else if (a == "--iso-size" && i + 1 < argc) iso_size = std::strtoull(argv[++i], nullptr, 10);
++        else if (a == "--data-dir" && i + 1 < argc) g_data_dir = argv[++i];
+         else if (a == "--memcard" && i + 1 < argc) ps2::g_options.memcard_path = argv[++i];
+         else if (a == "--trace-iop") ps2::g_options.trace_iop_modules = true;
+         else if (a == "--trace-iop-hle") ps2::g_options.trace_iop_hle = true;
+@@ -79,20 +138,58 @@ int main(int argc, char **argv) {
+             ps2::g_options.save_state_path = spec.substr(colon + 1);
+         }
+         else if (a == "--load-state" && i + 1 < argc) load_path = argv[++i];
++        else if (a == "--audio-out" && i + 1 < argc) audio_out = argv[++i];
+         else return usage();
+     }
+ 
++#ifdef __ANDROID__
++    if (!window) window = fullscreen = true;
++#endif
++    if (iso_fd >= 0) {
++        if (!ps2::disc::open_fd(iso_fd, iso_size, "Android SAF ISO")) return 1;
++#ifdef __ANDROID__
++        if (!g_data_dir.empty()) elf_path = g_data_dir + "/SCUS_974.81";
++        if (!extract_elf(elf_path)) return 1;
++#endif
++        args[0] = elf_path;
++    }
+ #ifdef PS2_WINDOW
+     if (window && !open_window(fullscreen)) return 1;
+ #endif
+     register_generated_code();
+     register_generated_vu();
++    std::FILE *audio_file = nullptr;
++    std::uint64_t audio_frames = 0;
++    if (!audio_out.empty()) {
++        audio_file = std::fopen(audio_out.c_str(), "wb");
++        if (!audio_file) {
++            std::fprintf(stderr, "cannot open %s\n", audio_out.c_str());
++            return 1;
++        }
++    }
++    const auto finish = [&](int result) {
++        if (audio_file) {
++            std::fclose(audio_file);
++            audio_file = nullptr;
++            std::fprintf(stderr, "[audio] wrote %llu stereo frames to %s\n",
++                         static_cast<unsigned long long>(audio_frames), audio_out.c_str());
++        }
++        return result;
++    };
+     const auto emulate = [&]() -> int {
+         std::uint32_t entry = 0;
+-        if (!ps2::load_elf(argv[1], entry)) {
+-            std::fprintf(stderr, "cannot load %s\n", argv[1]);
++        if (!ps2::load_elf(elf_path, entry)) {
++            std::fprintf(stderr, "cannot load %s\n", elf_path.c_str());
+             return 1;
+         }
++        if (audio_file) {
++            ps2::set_audio_sink([audio_file, &audio_frames](const std::int16_t *samples,
++                                                            std::size_t frames) {
++                if (std::fwrite(samples, sizeof(std::int16_t) * 2, frames, audio_file) == frames) {
++                    audio_frames += frames;
++                }
++            });
++        }
+         ps2::boot(entry, args);
+         if (!load_path.empty() && !ps2::load_state(load_path)) return 1;
+ #ifdef PS2_PROFILE
+@@ -101,9 +198,9 @@ int main(int argc, char **argv) {
+         if (profile) start_profile(profile_from ? std::strtoull(profile_from, nullptr, 10) : 0);
+         const int result = ps2::run();
+         if (profile) write_profile(profile);
+-        return result;
++        return finish(result);
+ #else
+-        return ps2::run();
++        return finish(ps2::run());
+ #endif
+     };
+ #ifdef PS2_WINDOW
+diff --git a/host/window.cpp b/host/window.cpp
+index 8289130..5e95354 100644
+--- a/host/window.cpp
++++ b/host/window.cpp
+@@ -2,8 +2,7 @@
+ 
+ #include "ps2/system.hpp"
+ 
+-#include <SDL.h>
+-#include <SDL_syswm.h>
++#include <SDL3/SDL.h>
+ #include <sys/resource.h>
+ #include <unistd.h>
+ 
+@@ -12,6 +11,7 @@
+ #include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
++#include <map>
+ #include <thread>
+ #include <vector>
+ 
+@@ -38,34 +38,93 @@ constexpr KeyBinding kKeys[] = {
+ };
+ 
+ struct PadBinding {
+-    SDL_GameControllerButton button;
++    SDL_GamepadButton button;
+     std::uint16_t mask;
+ };
+ 
+ constexpr PadBinding kPadButtons[] = {
+-    {SDL_CONTROLLER_BUTTON_A, kCross},          {SDL_CONTROLLER_BUTTON_B, kCircle},
+-    {SDL_CONTROLLER_BUTTON_X, kSquare},         {SDL_CONTROLLER_BUTTON_Y, kTriangle},
+-    {SDL_CONTROLLER_BUTTON_LEFTSHOULDER, kL1},  {SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, kR1},
+-    {SDL_CONTROLLER_BUTTON_LEFTSTICK, kL3},     {SDL_CONTROLLER_BUTTON_RIGHTSTICK, kR3},
+-    {SDL_CONTROLLER_BUTTON_BACK, kSelect},      {SDL_CONTROLLER_BUTTON_START, kStart},
+-    {SDL_CONTROLLER_BUTTON_DPAD_UP, kUp},       {SDL_CONTROLLER_BUTTON_DPAD_DOWN, kDown},
+-    {SDL_CONTROLLER_BUTTON_DPAD_LEFT, kLeft},   {SDL_CONTROLLER_BUTTON_DPAD_RIGHT, kRight},
++    {SDL_GAMEPAD_BUTTON_SOUTH, kCross},          {SDL_GAMEPAD_BUTTON_EAST, kCircle},
++    {SDL_GAMEPAD_BUTTON_WEST, kSquare},          {SDL_GAMEPAD_BUTTON_NORTH, kTriangle},
++    {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, kL1},     {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, kR1},
++    {SDL_GAMEPAD_BUTTON_LEFT_STICK, kL3},        {SDL_GAMEPAD_BUTTON_RIGHT_STICK, kR3},
++    {SDL_GAMEPAD_BUTTON_BACK, kSelect},          {SDL_GAMEPAD_BUTTON_START, kStart},
++    {SDL_GAMEPAD_BUTTON_DPAD_UP, kUp},           {SDL_GAMEPAD_BUTTON_DPAD_DOWN, kDown},
++    {SDL_GAMEPAD_BUTTON_DPAD_LEFT, kLeft},       {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, kRight},
+ };
+ 
+ SDL_Window *g_window = nullptr;
+ SDL_Renderer *g_renderer = nullptr;
+ SDL_Texture *g_texture = nullptr;
+-SDL_AudioDeviceID g_audio = 0;
+-// the keyboard drives the first controller port along with the first game controller, a second one is player 2
+-SDL_GameController *g_pads[2] = {};
++SDL_AudioStream *g_audio = nullptr;
++// The keyboard drives the first controller port along with the first gamepad.
++SDL_Gamepad *g_pads[2] = {};
+ std::uint32_t g_tex_w = 0, g_tex_h = 0;
+ std::uint64_t g_last = 0;
+ std::vector<std::uint32_t> g_pixels;
+ bool g_gpu_present = false;
+ 
++// Very small built-in touch layout. It is deliberately screen-relative so it
++// works on every phone aspect ratio without a platform-specific overlay.
++enum class TouchMode { none, left_stick, right_stick, button };
++struct TouchState {
++    TouchMode mode = TouchMode::none;
++    std::uint16_t button = 0;
++    float x = 0.0f, y = 0.0f;
++};
++std::map<SDL_FingerID, TouchState> g_touches;
++std::atomic<std::uint16_t> g_virtual_buttons{0};
++std::atomic<std::uint8_t> g_virtual_lx{0x80}, g_virtual_ly{0x80}, g_virtual_rx{0x80}, g_virtual_ry{0x80};
++std::atomic<bool> g_paused{false};
++
++std::uint16_t touch_button_at(float x, float y) {
++    // Face buttons, diamond around (0.86, 0.70).
++    if (x > 0.74f && y > 0.52f && y < 0.88f) {
++        const float dx = x - 0.86f, dy = y - 0.70f;
++        if (dx * dx + dy * dy < 0.13f * 0.13f) {
++            if (std::fabs(dx) > std::fabs(dy)) return dx > 0 ? kCircle : kSquare;
++            return dy < 0 ? kTriangle : kCross;
++        }
++    }
++    if (x < 0.12f && y > 0.60f && y < 0.77f) return kL1;
++    if (x < 0.12f && y >= 0.77f && y < 0.94f) return kL2;
++    if (x > 0.88f && y > 0.60f && y < 0.77f) return kR1;
++    if (x > 0.88f && y >= 0.77f && y < 0.94f) return kR2;
++    if (x > 0.43f && x < 0.57f && y > 0.91f) return kStart;
++    if (x > 0.29f && x < 0.43f && y > 0.91f) return kSelect;
++    return 0;
++}
++
++void update_touch_axes() {
++    std::uint16_t buttons = 0;
++    float lx = 0.5f, ly = 0.5f, rx = 0.5f, ry = 0.5f;
++    bool left = false, right = false;
++    for (const auto &[id, t] : g_touches) {
++        (void)id;
++        if (t.mode == TouchMode::button) {
++            buttons |= t.button;
++        } else if (t.mode == TouchMode::left_stick) {
++            left = true;
++            lx = 0.5f + (t.x - 0.22f) * 2.5f;
++            ly = 0.5f + (t.y - 0.78f) * 2.5f;
++        } else if (t.mode == TouchMode::right_stick) {
++            right = true;
++            rx = 0.5f + (t.x - 0.64f) * 2.5f;
++            ry = 0.5f + (t.y - 0.72f) * 2.5f;
++        }
++    }
++    const auto to_byte = [](float v) {
++        return static_cast<std::uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
++    };
++    g_virtual_buttons.store(buttons);
++    g_virtual_lx.store(left ? to_byte(lx) : 0x80);
++    g_virtual_ly.store(left ? to_byte(ly) : 0x80);
++    g_virtual_rx.store(right ? to_byte(rx) : 0x80);
++    g_virtual_ry.store(right ? to_byte(ry) : 0x80);
++}
++
+ bool create_renderer() {
+-    g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED);
+-    if (!g_renderer) g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_SOFTWARE);
++    g_renderer = SDL_CreateRenderer(g_window, nullptr);
++    if (!g_renderer) g_renderer = SDL_CreateRenderer(g_window, "software");
+     if (!g_renderer) {
+         std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
+         return false;
+@@ -75,71 +134,72 @@ bool create_renderer() {
+ 
+ bool attach_gpu() {
+     if (std::getenv("PS2_SDL_RENDERER")) return false;
+-    SDL_SysWMinfo info;
+-    SDL_VERSION(&info.version);
+-    if (!SDL_GetWindowWMInfo(g_window, &info)) return false;
+     ps2::WindowTarget target;
+     int w = 0, h = 0;
+     SDL_GetWindowSizeInPixels(g_window, &w, &h);
+     target.width = static_cast<std::uint32_t>(w);
+     target.height = static_cast<std::uint32_t>(h);
+-    switch (info.subsystem) {
+-#if defined(SDL_VIDEO_DRIVER_X11)
+-    case SDL_SYSWM_X11:
++    SDL_PropertiesID props = SDL_GetWindowProperties(g_window);
++#if defined(SDL_PLATFORM_ANDROID)
++    target.kind = ps2::WindowTarget::Android;
++    target.surface = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
++    if (!target.surface) return false;
++#elif defined(SDL_PLATFORM_LINUX)
++    void *display = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr);
++    if (display) {
+         target.kind = ps2::WindowTarget::X11;
+-        target.display = info.info.x11.display;
+-        target.window = static_cast<std::uint64_t>(info.info.x11.window);
+-        break;
+-#endif
+-#if defined(SDL_VIDEO_DRIVER_WAYLAND)
+-    case SDL_SYSWM_WAYLAND:
++        target.display = display;
++        target.window = static_cast<std::uint64_t>(SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0));
++    } else {
++        display = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr);
++        void *surface = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr);
++        if (!display || !surface) return false;
+         target.kind = ps2::WindowTarget::Wayland;
+-        target.display = info.info.wl.display;
+-        target.surface = info.info.wl.surface;
+-        break;
+-#endif
+-    default: return false;
++        target.display = display;
++        target.surface = surface;
+     }
++#else
++    return false;
++#endif
+     return ps2::attach_window(target);
+ }
+ 
+-std::uint8_t axis(SDL_GameController *pad, SDL_GameControllerAxis a) {
+-    const int v = SDL_GameControllerGetAxis(pad, a);
++std::uint8_t axis(SDL_Gamepad *pad, SDL_GamepadAxis a) {
++    const int v = SDL_GetGamepadAxis(pad, a);
+     return static_cast<std::uint8_t>(std::clamp((v + 32768) >> 8, 0, 255));
+ }
+ 
+ void rumble(int port) {
+     static double last_strong[2] = {};
+     static bool last_weak[2] = {};
+-    static Uint32 sent[2] = {};
+-    SDL_GameController *pad = g_pads[port];
++    static Uint64 sent[2] = {};
++    SDL_Gamepad *pad = g_pads[port];
+     if (!pad) return;
+     const std::uint16_t motors = ps2::pad_rumble(port);
+     const double strong = (motors >> 8) < 16 ? 0.0 : std::sqrt((motors >> 8) / 255.0);
+     const bool weak = motors & 1u;
+-    const Uint32 now = SDL_GetTicks();
++    const Uint64 now = SDL_GetTicks();
+     if (std::fabs(strong - last_strong[port]) <= 0.08 && weak == last_weak[port] && (!(strong > 0.0 || weak) || now - sent[port] < 100)) return;
+     last_strong[port] = strong;
+     last_weak[port] = weak;
+     sent[port] = now;
+-    SDL_GameControllerRumble(pad, static_cast<Uint16>(strong * 65535.0), weak ? 0xFFFF : 0, strong > 0.0 || weak ? 200 : 0);
++    SDL_RumbleGamepad(pad, static_cast<Uint16>(strong * 65535.0), weak ? 0xFFFF : 0, strong > 0.0 || weak ? 200 : 0);
+ }
+ 
+-// a new controller takes the first free port, the second one plugs in player 2
+-void open_pad(int device) {
+-    const SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(device);
+-    for (SDL_GameController *pad : g_pads)
+-        if (pad && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad)) == id) return;
++// A new gamepad takes the first free port, the second one plugs in player 2.
++void open_pad(SDL_JoystickID id) {
++    for (SDL_Gamepad *pad : g_pads)
++        if (pad && SDL_GetGamepadID(pad) == id) return;
+     for (int port = 0; port < 2; ++port)
+         if (!g_pads[port]) {
+-            g_pads[port] = SDL_GameControllerOpen(device);
++            g_pads[port] = SDL_OpenGamepad(id);
+             return;
+         }
+ }
+ 
+ void poll_port(int port) {
+     static bool plugged[2] = {};
+-    SDL_GameController *pad = g_pads[port];
++    SDL_Gamepad *pad = g_pads[port];
+     if (port > 0 && plugged[port] != (pad != nullptr)) {
+         plugged[port] = pad != nullptr;
+         ps2::set_pad_connected(port, plugged[port]);
+@@ -148,29 +208,34 @@ void poll_port(int port) {
+     std::uint8_t l2 = 0xFF, r2 = 0xFF;
+     std::uint8_t lx = 0x80, ly = 0x80, rx = 0x80, ry = 0x80;
+     if (port == 0) {
+-        const Uint8 *keys = SDL_GetKeyboardState(nullptr);
++        const bool *keys = SDL_GetKeyboardState(nullptr);
+         for (const KeyBinding &b : kKeys)
+             if (keys[b.key]) pressed |= b.button;
+         if (keys[SDL_SCANCODE_LEFT]) lx = 0x00;
+         if (keys[SDL_SCANCODE_RIGHT]) lx = 0xFF;
+         if (keys[SDL_SCANCODE_UP]) ly = 0x00;
+         if (keys[SDL_SCANCODE_DOWN]) ly = 0xFF;
++        pressed |= g_virtual_buttons.load();
++        if (lx == 0x80) lx = g_virtual_lx.load();
++        if (ly == 0x80) ly = g_virtual_ly.load();
++        if (rx == 0x80) rx = g_virtual_rx.load();
++        if (ry == 0x80) ry = g_virtual_ry.load();
+     }
+     if (pad) {
+         for (const PadBinding &b : kPadButtons)
+-            if (SDL_GameControllerGetButton(pad, b.button)) pressed |= b.mask;
+-        const auto trigger = [&](SDL_GameControllerAxis a, std::uint16_t bit, std::uint8_t &pressure) {
+-            const int v = SDL_GameControllerGetAxis(pad, a);
++            if (SDL_GetGamepadButton(pad, b.button)) pressed |= b.mask;
++        const auto trigger = [&](SDL_GamepadAxis a, std::uint16_t bit, std::uint8_t &pressure) {
++            const int v = SDL_GetGamepadAxis(pad, a);
+             if (v <= 2000 || (pressed & bit)) return;
+             pressed |= bit;
+             pressure = static_cast<std::uint8_t>(std::max(1, v * 255 / 32767));
+         };
+-        trigger(SDL_CONTROLLER_AXIS_TRIGGERLEFT, kL2, l2);
+-        trigger(SDL_CONTROLLER_AXIS_TRIGGERRIGHT, kR2, r2);
+-        if (lx == 0x80) lx = axis(pad, SDL_CONTROLLER_AXIS_LEFTX);
+-        if (ly == 0x80) ly = axis(pad, SDL_CONTROLLER_AXIS_LEFTY);
+-        rx = axis(pad, SDL_CONTROLLER_AXIS_RIGHTX);
+-        ry = axis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
++        trigger(SDL_GAMEPAD_AXIS_LEFT_TRIGGER, kL2, l2);
++        trigger(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, kR2, r2);
++        if (lx == 0x80) lx = axis(pad, SDL_GAMEPAD_AXIS_LEFTX);
++        if (ly == 0x80) ly = axis(pad, SDL_GAMEPAD_AXIS_LEFTY);
++        rx = axis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
++        ry = axis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
+     }
+     rumble(port);
+     static std::uint64_t last[2] = {~0ull, ~0ull};
+@@ -187,27 +252,65 @@ void poll_port(int port) {
+     ps2::set_pad_axis(3, ly, port);
+ }
+ 
++bool lifecycle_watch(void *, SDL_Event *e) {
++    if (e->type == SDL_EVENT_DID_ENTER_BACKGROUND) g_paused.store(true);
++    if (e->type == SDL_EVENT_WILL_ENTER_FOREGROUND) g_paused.store(false);
++    return true;
++}
++
+ void poll() {
+     SDL_Event e;
+     while (SDL_PollEvent(&e)) {
+-        if (e.type == SDL_QUIT) ps2::halt("window closed");
+-        if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
+-            const bool full = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN;
+-            SDL_SetWindowFullscreen(g_window, full ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+-            SDL_ShowCursor(full ? SDL_ENABLE : SDL_DISABLE);
++        if (e.type == SDL_EVENT_QUIT) ps2::halt("window closed");
++        if (e.type == SDL_EVENT_WINDOW_FOCUS_LOST) g_paused.store(true);
++        if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
++            g_paused.store(false);
++            g_last = 0;
+         }
+-        if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED && g_gpu_present) {
++        if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
++            const bool full = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) != 0;
++            SDL_SetWindowFullscreen(g_window, !full);
++            if (full) SDL_ShowCursor(); else SDL_HideCursor();
++        }
++        if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && g_gpu_present) {
+             int w = 0, h = 0;
+             SDL_GetWindowSizeInPixels(g_window, &w, &h);
+             ps2::resize_window(static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
+         }
+-        if (e.type == SDL_CONTROLLERDEVICEADDED) open_pad(e.cdevice.which);
+-        if (e.type == SDL_CONTROLLERDEVICEREMOVED)
+-            for (SDL_GameController *&pad : g_pads)
+-                if (pad && e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad))) {
+-                    SDL_GameControllerClose(pad);
++        if (e.type == SDL_EVENT_GAMEPAD_ADDED) open_pad(e.gdevice.which);
++        if (e.type == SDL_EVENT_GAMEPAD_REMOVED)
++            for (SDL_Gamepad *&pad : g_pads)
++                if (pad && e.gdevice.which == SDL_GetGamepadID(pad)) {
++                    SDL_CloseGamepad(pad);
+                     pad = nullptr;
+                 }
++#ifndef SDL_PLATFORM_ANDROID
++        if (e.type == SDL_EVENT_FINGER_DOWN) {
++            TouchState t;
++            t.x = e.tfinger.x;
++            t.y = e.tfinger.y;
++            t.button = touch_button_at(t.x, t.y);
++            if (t.button) {
++                t.mode = TouchMode::button;
++            } else if (t.x < 0.42f && t.y > 0.45f) {
++                t.mode = TouchMode::left_stick;
++            } else if (t.x > 0.48f && t.x < 0.80f && t.y > 0.45f && t.y < 0.88f) {
++                t.mode = TouchMode::right_stick;
++            }
++            g_touches[e.tfinger.fingerID] = t;
++            update_touch_axes();
++        } else if (e.type == SDL_EVENT_FINGER_MOTION) {
++            auto it = g_touches.find(e.tfinger.fingerID);
++            if (it != g_touches.end()) {
++                it->second.x = e.tfinger.x;
++                it->second.y = e.tfinger.y;
++                update_touch_axes();
++            }
++        } else if (e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) {
++            g_touches.erase(e.tfinger.fingerID);
++            update_touch_axes();
++        }
++#endif
+     }
+     poll_port(0);
+     poll_port(1);
+@@ -217,13 +320,13 @@ void show_pixels(const std::uint32_t *rgba, std::uint32_t w, std::uint32_t h) {
+     if (w != g_tex_w || h != g_tex_h) {
+         if (g_texture) SDL_DestroyTexture(g_texture);
+         g_texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, static_cast<int>(w), static_cast<int>(h));
+-        SDL_RenderSetLogicalSize(g_renderer, static_cast<int>(w), static_cast<int>(w) * (ps2::g_options.widescreen ? 9 : 3) / (ps2::g_options.widescreen ? 16 : 4));
++        SDL_SetRenderLogicalPresentation(g_renderer, static_cast<int>(w), static_cast<int>(h), SDL_LOGICAL_PRESENTATION_LETTERBOX);
+         g_tex_w = w;
+         g_tex_h = h;
+     }
+     SDL_UpdateTexture(g_texture, nullptr, rgba, static_cast<int>(w * 4));
+     SDL_RenderClear(g_renderer);
+-    SDL_RenderCopy(g_renderer, g_texture, nullptr, nullptr);
++    SDL_RenderTexture(g_renderer, g_texture, nullptr, nullptr);
+     SDL_RenderPresent(g_renderer);
+ }
+ 
+@@ -239,10 +342,11 @@ void present() {
+ constexpr Uint32 kAudioBytesPerMs = 48 * 4;
+ 
+ void pace() {
++    while (g_paused.load()) SDL_Delay(16);
+     if (g_audio) {
+-        // The audio device clock paces emulation: wait while more than ~80 ms of sound is queued.
+-        while (SDL_GetQueuedAudioSize(g_audio) > 80 * kAudioBytesPerMs) SDL_Delay(1);
+-        return;
++        // Keep the audio queue bounded, but do not let silence (or a game that
++        // has not uploaded samples yet) turn off frame pacing entirely.
++        while (SDL_GetAudioStreamQueued(g_audio) > 80 * static_cast<int>(kAudioBytesPerMs)) SDL_Delay(1);
+     }
+     const std::uint64_t frequency = SDL_GetPerformanceFrequency();
+     const std::uint64_t period = frequency / (ps2::g_options.pal ? 50 : 60);
+@@ -284,7 +388,7 @@ void show_speed() {
+     if (seconds < 1.0) return;
+     const double cpu = process_cpu_seconds(), gpu = ps2::gpu_busy_ms();
+     char title[192];
+-    const double queued = g_audio ? SDL_GetQueuedAudioSize(g_audio) / static_cast<double>(kAudioBytesPerMs) : 0.0;
++    const double queued = g_audio ? SDL_GetAudioStreamQueued(g_audio) / static_cast<double>(kAudioBytesPerMs) : 0.0;
+     std::snprintf(title, sizeof title, "ps2-web-recomp  %.1f fps  CPU %.0f%%  GPU %.0f%%  RAM %.0f MB  audio %.0f ms", static_cast<double>(frames) / seconds,
+                   (cpu - cpu_start) / seconds * 100.0, (gpu - gpu_start) / (seconds * 10.0), resident_mb(), queued);
+     SDL_SetWindowTitle(g_window, title);
+@@ -302,37 +406,56 @@ void on_vblank() {
+ }
+ 
+ void queue_audio(const std::int16_t *samples, std::size_t frames) {
+-    if (SDL_GetQueuedAudioSize(g_audio) > 500 * kAudioBytesPerMs) return;
+-    SDL_QueueAudio(g_audio, samples, static_cast<Uint32>(frames * 4));
++    if (!g_audio) return;
++    if (SDL_GetAudioStreamQueued(g_audio) > 500 * static_cast<int>(kAudioBytesPerMs)) return;
++    SDL_PutAudioStreamData(g_audio, samples, static_cast<int>(frames * 4));
+ }
+ 
++} // namespace
++
++void set_virtual_pad(std::uint16_t buttons, std::uint8_t lx, std::uint8_t ly,
++                     std::uint8_t rx, std::uint8_t ry) {
++    g_virtual_buttons.store(buttons);
++    g_virtual_lx.store(lx);
++    g_virtual_ly.store(ly);
++    g_virtual_rx.store(rx);
++    g_virtual_ry.store(ry);
+ }
+ 
+ bool open_window(bool fullscreen) {
+-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
++    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
+         std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
+         return false;
+     }
+-    const Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0u);
+-    g_window = SDL_CreateWindow("ps2-web-recomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, ps2::g_options.widescreen ? 1280 : 960, 720, flags);
++    SDL_AddEventWatch(lifecycle_watch, nullptr);
++    Uint64 flags = SDL_WINDOW_HIGH_PIXEL_DENSITY;
++#ifdef SDL_PLATFORM_ANDROID
++    flags |= SDL_WINDOW_FULLSCREEN;
++#else
++    if (fullscreen) flags |= SDL_WINDOW_FULLSCREEN;
++#endif
++    g_window = SDL_CreateWindow("God of War II", ps2::g_options.widescreen ? 1280 : 960, 720, flags);
+     if (!g_window) {
+         std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
+         return false;
+     }
+-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
+-    SDL_AudioSpec want{}, have{};
+-    want.freq = 48000;
+-    want.format = AUDIO_S16SYS;
++    SDL_AudioSpec want{};
++    want.format = SDL_AUDIO_S16;
+     want.channels = 2;
+-    want.samples = 1024;
+-    g_audio = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
++    want.freq = 48000;
++    g_audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &want, nullptr, nullptr);
+     if (g_audio) {
+-        SDL_PauseAudioDevice(g_audio, 0);
++        SDL_ResumeAudioStreamDevice(g_audio);
+         ps2::set_audio_sink(queue_audio);
+     }
+-    for (int i = 0; i < SDL_NumJoysticks(); ++i)
+-        if (SDL_IsGameController(i)) open_pad(i);
+-    if (fullscreen) SDL_ShowCursor(SDL_DISABLE);
++    int count = 0;
++    SDL_JoystickID *ids = SDL_GetGamepads(&count);
++    for (int i = 0; i < count; ++i)
++        if (SDL_IsGamepad(ids[i])) open_pad(ids[i]);
++    SDL_free(ids);
++#ifndef SDL_PLATFORM_ANDROID
++    if (fullscreen) SDL_HideCursor();
++#endif
+     return true;
+ }
+ 
+diff --git a/host/window.hpp b/host/window.hpp
+index 3174ae9..3c93f22 100644
+--- a/host/window.hpp
++++ b/host/window.hpp
+@@ -1,6 +1,11 @@
+ #pragma once
+ 
++#include <cstdint>
+ #include <functional>
+ 
+ bool open_window(bool fullscreen);
+ int run_window(const std::function<int()> &emulate);
++
++// Android's visible touch overlay feeds the first controller port through this.
++void set_virtual_pad(std::uint16_t buttons, std::uint8_t lx, std::uint8_t ly,
++                     std::uint8_t rx, std::uint8_t ry);
+diff --git a/runtime/include/ps2/disc.hpp b/runtime/include/ps2/disc.hpp
+index 0f1af64..c5600bb 100644
+--- a/runtime/include/ps2/disc.hpp
++++ b/runtime/include/ps2/disc.hpp
+@@ -22,6 +22,8 @@ using Probe = std::function<bool(std::uint64_t offset, std::size_t size)>;
+ 
+ bool open(const std::string &path);
+ bool open(const std::string &name, std::uint64_t size, Reader reader, Probe probe = {});
++// Android/SAF: read an already-open file descriptor with pread. The caller keeps it open.
++bool open_fd(int fd, std::uint64_t size, const std::string &name = "disc");
+ bool is_open();
+ bool read(std::uint32_t sector, std::uint32_t count, void *out);
+ bool ready(std::uint32_t sector, std::uint32_t count);
+diff --git a/runtime/include/ps2/system.hpp b/runtime/include/ps2/system.hpp
+index d794aee..65e74dc 100644
+--- a/runtime/include/ps2/system.hpp
++++ b/runtime/include/ps2/system.hpp
+@@ -101,7 +101,7 @@ std::uint64_t frame_count();
+ bool display_frame(std::vector<std::uint32_t> &rgba, std::uint32_t &width, std::uint32_t &height);
+ 
+ struct WindowTarget {
+-    enum Kind { X11, Wayland, Canvas } kind = X11;
++    enum Kind { X11, Wayland, Canvas, Android } kind = X11;
+     void *display = nullptr;
+     std::uint64_t window = 0;
+     void *surface = nullptr;
+diff --git a/runtime/src/disc.cpp b/runtime/src/disc.cpp
+index 4491f35..1f58bfb 100644
+--- a/runtime/src/disc.cpp
++++ b/runtime/src/disc.cpp
+@@ -2,9 +2,13 @@
+ 
+ #include <algorithm>
+ #include <cctype>
++#include <cerrno>
+ #include <cstdio>
+ #include <cstring>
+ #include <map>
++#if !defined(_WIN32)
++#include <unistd.h>
++#endif
+ 
+ namespace ps2::disc {
+ 
+@@ -83,6 +87,29 @@ bool open(const std::string &path) {
+     });
+ }
+ 
++bool open_fd(int fd, std::uint64_t size, const std::string &name) {
++#if defined(_WIN32)
++    (void)fd; (void)size; (void)name;
++    return false;
++#else
++    if (fd < 0 || size == 0) return false;
++    return open(name, size, [fd](std::uint64_t offset, void *out, std::size_t bytes) -> std::size_t {
++        std::uint8_t *p = static_cast<std::uint8_t *>(out);
++        std::size_t done = 0;
++        while (done < bytes) {
++            const ssize_t got = ::pread(fd, p + done, bytes - done, static_cast<off_t>(offset + done));
++            if (got < 0) {
++                if (errno == EINTR) continue;
++                break;
++            }
++            if (got == 0) break;
++            done += static_cast<std::size_t>(got);
++        }
++        return done;
++    });
++#endif
++}
++
+ bool open(const std::string &name, std::uint64_t size, Reader reader, Probe probe) {
+     g_reader = std::move(reader);
+     g_probe = std::move(probe);
+diff --git a/runtime/src/gs/gpu/gpu.cpp b/runtime/src/gs/gpu/gpu.cpp
+index dc1f3b2..14693e4 100644
+--- a/runtime/src/gs/gpu/gpu.cpp
++++ b/runtime/src/gs/gpu/gpu.cpp
+@@ -1640,6 +1640,7 @@ bool attach_surface(const SurfaceTarget &target) {
+ #else
+     WGPUSurfaceSourceXlibWindow xlib = WGPU_SURFACE_SOURCE_XLIB_WINDOW_INIT;
+     WGPUSurfaceSourceWaylandSurface wayland = WGPU_SURFACE_SOURCE_WAYLAND_SURFACE_INIT;
++    WGPUSurfaceSourceAndroidNativeWindow android = WGPU_SURFACE_SOURCE_ANDROID_NATIVE_WINDOW_INIT;
+     if (target.kind == SurfaceTarget::X11) {
+         xlib.display = target.display;
+         xlib.window = target.window;
+@@ -1648,6 +1649,9 @@ bool attach_surface(const SurfaceTarget &target) {
+         wayland.display = target.display;
+         wayland.surface = target.surface;
+         sd.nextInChain = &wayland.chain;
++    } else if (target.kind == SurfaceTarget::Android) {
++        android.window = target.surface;
++        sd.nextInChain = &android.chain;
+     } else {
+         return false;
+     }
+diff --git a/runtime/src/gs/gpu/gpu.hpp b/runtime/src/gs/gpu/gpu.hpp
+index 2f09e51..328b6f6 100644
+--- a/runtime/src/gs/gpu/gpu.hpp
++++ b/runtime/src/gs/gpu/gpu.hpp
+@@ -15,7 +15,7 @@ struct DisplaySource {
+ };
+ 
+ struct SurfaceTarget {
+-    enum Kind { X11, Wayland, Canvas } kind;
++    enum Kind { X11, Wayland, Canvas, Android } kind;
+     void *display;
+     std::uint64_t window;
+     void *surface;
+diff --git a/runtime/src/iop/cdvd.cpp b/runtime/src/iop/cdvd.cpp
+index 218cbda..5950b22 100644
+--- a/runtime/src/iop/cdvd.cpp
++++ b/runtime/src/iop/cdvd.cpp
+@@ -166,6 +166,19 @@ std::int32_t load_module(const std::string &path, const std::string &args, std::
+     std::string lower = path;
+     for (char &ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+     if (lower.rfind("cdrom", 0) == 0) data = kernel::read_disc_file(path);
++    // Some retail games name the extra IOP modules through the development
++    // host: device even though the files live in the disc root. Resolve the
++    // request against the disc before reporting a missing module.
++    if (data.empty() && lower.rfind("host0:", 0) == 0) {
++        std::string relative = path.substr(path.find(':') + 1);
++        while (!relative.empty() && (relative.front() == '/' || relative.front() == '\\')) relative.erase(relative.begin());
++        data = kernel::read_disc_file("cdrom0:" + relative);
++        if (data.empty()) {
++            const auto slash = relative.find_last_of("/\\");
++            const std::string basename = slash == std::string::npos ? relative : relative.substr(slash + 1);
++            data = kernel::read_disc_file("cdrom0:" + basename);
++        }
++    }
+     if (data.empty() && lower.rfind("rom0:", 0) != 0) {
+         std::fprintf(stderr, "[iop] cannot read module %s\n", path.c_str());
+     }
+diff --git a/runtime/src/iop/io.cpp b/runtime/src/iop/io.cpp
+index c00c0bf..2d4555b 100644
+--- a/runtime/src/iop/io.cpp
++++ b/runtime/src/iop/io.cpp
+@@ -7,7 +7,10 @@
+ 
+ #include <algorithm>
+ #include <cstdio>
++#include <cstring>
+ #include <map>
++#include <string>
++#include <vector>
+ 
+ namespace ps2::iop::io {
+ 
+@@ -25,7 +28,15 @@ struct File {
+     bool in_memory = false;
+ };
+ 
++struct TocFile {
++    std::uint32_t sector = 0;
++    std::uint32_t size = 0;
++};
++
+ std::map<int, File> g_files;
++std::map<std::string, TocFile> g_toc;
++bool g_toc_loaded = false;
++bool g_toc_failed = false;
+ 
+ std::string device_of(const std::string &path) {
+     const auto colon = path.find(':');
+@@ -35,6 +46,83 @@ std::string device_of(const std::string &path) {
+     return d;
+ }
+ 
++std::string upper(std::string text) {
++    for (char &ch : text) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
++    return text;
++}
++
++std::uint32_t le32(const std::uint8_t *p) {
++    return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
++           (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
++}
++
++// GoW2 keeps the WAD/VPK/VAG files in PART1.PAK and PART2.PAK and indexes them
++// through GODOFWAR.TOC.  The IOP asks for them through its host1: device, so
++// expose the TOC entries as ordinary read-only files here.
++void load_toc() {
++    if (g_toc_loaded || g_toc_failed) return;
++    const auto toc = disc::find("GODOFWAR.TOC");
++    const auto part1 = disc::find("PART1.PAK");
++    const auto part2 = disc::find("PART2.PAK");
++    if (!toc || !part1 || !part2 || toc->size < 4) {
++        g_toc_failed = true;
++        return;
++    }
++    const std::uint32_t sectors = static_cast<std::uint32_t>((toc->size + disc::kSector - 1) / disc::kSector);
++    std::vector<std::uint8_t> data(static_cast<std::size_t>(sectors) * disc::kSector);
++    disc::read(toc->sector, sectors, data.data());
++    data.resize(toc->size);
++    const std::uint32_t count = le32(data.data());
++    const std::size_t entries_at = 4;
++    const std::size_t entries_end = entries_at + static_cast<std::size_t>(count) * 36;
++    if (entries_end > data.size()) {
++        g_toc_failed = true;
++        return;
++    }
++    const std::size_t offsets_count = (data.size() - entries_end) / 4;
++    for (std::uint32_t i = 0; i < count; ++i) {
++        const std::size_t at = entries_at + static_cast<std::size_t>(i) * 36;
++        std::string name;
++        for (std::size_t j = 0; j < 24 && data[at + j]; ++j) name += static_cast<char>(data[at + j]);
++        const std::uint32_t size = le32(data.data() + at + 24);
++        const std::uint32_t encounters = le32(data.data() + at + 28);
++        const std::uint32_t first = le32(data.data() + at + 32);
++        if (name.empty() || size == 0 || encounters == 0 || first >= offsets_count) continue;
++        const std::uint32_t offset_id = le32(data.data() + entries_end + static_cast<std::size_t>(first) * 4);
++        const std::uint32_t pak = offset_id / 10000000u;
++        const std::uint32_t sector = offset_id % 10000000u;
++        if (pak > 1) continue;
++        const std::uint64_t absolute = static_cast<std::uint64_t>(pak == 0 ? part1->sector : part2->sector) + sector;
++        if (absolute > 0xFFFFFFFFu) continue;
++        g_toc[upper(name)] = TocFile{static_cast<std::uint32_t>(absolute), size};
++    }
++    g_toc_loaded = true;
++    if (kernel::g_trace_hle) std::fprintf(stderr, "[io] loaded %zu TOC entries\n", g_toc.size());
++}
++
++const TocFile *toc_file(const std::string &path) {
++    load_toc();
++    if (g_toc.empty()) return nullptr;
++    std::string name = path;
++    const auto colon = name.find(':');
++    if (colon != std::string::npos) name = name.substr(colon + 1);
++    while (!name.empty() && (name.front() == '/' || name.front() == '\\')) name.erase(name.begin());
++    name = upper(name);
++    auto it = g_toc.find(name);
++    if (it != g_toc.end()) return &it->second;
++    constexpr const char *kPrefix = "WAD/";
++    if (name.rfind(kPrefix, 0) == 0) {
++        it = g_toc.find(name.substr(std::strlen(kPrefix)));
++        if (it != g_toc.end()) return &it->second;
++    }
++    const auto slash = name.find_last_of("/\\");
++    if (slash != std::string::npos) {
++        it = g_toc.find(name.substr(slash + 1));
++        if (it != g_toc.end()) return &it->second;
++    }
++    return nullptr;
++}
++
+ int allocate() {
+     for (int fd = 3; fd < 64; ++fd)
+         if (!g_files.count(fd)) return fd;
+@@ -63,6 +151,14 @@ int open(const std::string &path, std::uint32_t flags) {
+         }
+         f.in_memory = true;
+         f.size = static_cast<std::uint32_t>(f.memory.size());
++    } else if (device == "host1" || device == "host") {
++        const TocFile *entry = toc_file(path);
++        if (!entry) {
++            std::fprintf(stderr, "[io] open %s (flags 0x%X): not in GODOFWAR.TOC\n", path.c_str(), flags);
++            return kNoEntry;
++        }
++        f.sector = entry->sector;
++        f.size = entry->size;
+     } else {
+         std::fprintf(stderr, "[io] open %s (flags 0x%X) on unsupported device\n", path.c_str(), flags);
+         return kNoEntry;
+@@ -112,7 +208,15 @@ std::int64_t seek(int fd, std::int64_t offset, int whence) {
+ }
+ 
+ bool stat(const std::string &path, std::uint32_t &mode, std::uint32_t &size) {
+-    if (device_of(path) != "cdrom") return false;
++    const std::string device = device_of(path);
++    if (device == "host1" || device == "host") {
++        const TocFile *entry = toc_file(path);
++        if (!entry) return false;
++        mode = 0x0017u;
++        size = entry->size;
++        return true;
++    }
++    if (device != "cdrom") return false;
+     const auto entry = disc::find(path);
+     if (!entry) return false;
+     mode = entry->directory ? 0x0027u : 0x0017u;
+diff --git a/runtime/src/system.cpp b/runtime/src/system.cpp
+index 35802ac..0f7e023 100644
+--- a/runtime/src/system.cpp
++++ b/runtime/src/system.cpp
+@@ -379,7 +379,7 @@ void boot(std::uint32_t entry, const std::vector<std::string> &args) {
+     init_watch();
+     hw::reset();
+     kernel::reset();
+-    if (!g_options.disc_path.empty() && !disc::open(g_options.disc_path))
++    if (!disc::is_open() && !g_options.disc_path.empty() && !disc::open(g_options.disc_path))
+         std::fprintf(stderr, "[ee] cannot open disc image %s\n", g_options.disc_path.c_str());
+     iop::set_trace(g_options.trace_iop_modules, g_options.trace_iop_hle);
+     iop::reset();
