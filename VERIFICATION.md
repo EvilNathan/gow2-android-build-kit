@@ -17,6 +17,10 @@ Android SDK platform 35, NDK 27.3.13750724, CMake 3.30.5.
   `PS2_VU_SKIP`; the native runner was rebuilt and produced
   `[vu] AOT programs registered: 117/117` by default, `112/117` with the five
   hashes skipped, and `[vu] AOT disabled` with `PS2_VU_AOT=0`.
+- **Interpreter fallback regression.** With the five skipped, a 300-frame and a
+  3,500-frame headless run completed (17,206,164,887 cycles, exit 0). The same
+  300 frames with all 117 enabled also completed on desktop, so the phone crash
+  is not reproduced by the desktop runtime in the first 300 frames.
 - **APK v2.3.** versionCode 6 / versionName 2.3, 13,192,938 bytes, SHA-256
   `B612E1BA300053041C08358E6C9ECE04384296A5F12D9BEE61C3EF65AFBF577F`.
   `PS2_VU_AOT`/`PS2_VU_SKIP` strings are present, `dlopen`/`dlclose` stay

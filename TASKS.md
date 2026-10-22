@@ -149,6 +149,7 @@ machine).
 - [x] `[app] game start: ... vu_aot=... vu_skip=...` written to `/sdcard/gow2/log.txt`
 - [x] v2.3 APK built and uploaded: 13,192,938 bytes, sha256 `B612E1BA…577F`,
   release `v2.3.0`; download-back hash matches
+- [x] Native regression with the five skipped: 300-frame and 3,500-frame headless runs completed (17,206,164,887 cycles, exit 0), so the interpreter fallback survives full boot and gameplay.
 - [ ] **Device confirmation**: install v2.3, boot, then enable one program at a time from Settings; record the hash that crashes
 - [ ] Fix `vurecomp`/codegen for the offending program (or keep it on the interpreter permanently; cost is small)
 - [ ] Long headless run (3,500+ frames) with all five enabled under ASan/UBSan
