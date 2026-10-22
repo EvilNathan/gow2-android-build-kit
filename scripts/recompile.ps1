@@ -5,10 +5,34 @@ param(
     [switch]$SkipExplore,
     # Reuse a recorded VU capture instead of replaying the game for ~20 minutes
     # per round. Point this at a folder of *.bin records from an earlier run.
-    [string]$VuCache = ""
+    [string]$VuCache = "",
+    # Named capture budget: quick (no replay), standard (2400 frames), full (4200).
+    [ValidateSet("", "quick", "standard", "full")]
+    [string]$Preset = ""
 )
 
 . (Join-Path $PSScriptRoot "common.ps1")
+
+if ($Preset) {
+    $framesGiven = $PSBoundParameters.ContainsKey("Frames")
+    $roundsGiven = $PSBoundParameters.ContainsKey("ExploreRounds")
+    switch ($Preset) {
+        "quick" { if (-not $framesGiven) { $Frames = 0 }; $SkipExplore = $true }
+        "standard" {
+            if (-not $framesGiven) { $Frames = 2400 }
+            if (-not $roundsGiven) { $ExploreRounds = 3 }
+        }
+        "full" {
+            if (-not $framesGiven) { $Frames = 4200 }
+            if (-not $roundsGiven) { $ExploreRounds = 5 }
+        }
+    }
+    if ($Preset -eq "quick") {
+        Write-Host "Preset quick: no VU replay; missing programs are interpreted."
+    } else {
+        Write-Host "Preset ${Preset}: $Frames frames, up to $ExploreRounds round(s)."
+    }
+}
 
 $isoPath = Get-IsoPath $Iso
 $eerecomp = Get-Tool "eerecomp"

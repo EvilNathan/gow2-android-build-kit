@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="40"
+                android:gradientRadius="78"
+                android:startColor="#6B1F12"
+                android:centerColor="#2C0D08"
+                android:endColor="#080505" />
+        </aapt:attr>
+    </path>
+
+    <!-- Soft light from the top-left, like firelight on bronze. -->
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0"
+                android:startY="0"
+                android:endX="108"
+                android:endY="108"
+                android:startColor="#33E0B36A"
+                android:endColor="#00000000" />
+        </aapt:attr>
+    </path>
+</vector>

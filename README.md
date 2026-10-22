@@ -21,32 +21,92 @@ window, audio device, gamepads, and lifecycle handling.
 | --- | --- |
 | Recompiler tools (`eerecomp`, `vurecomp`) build on Windows | ✅ passing |
 | Emotion Engine translation of the USA disc | ✅ 477,499 instructions → 118 C++ units |
-| VU1 AOT compilation | ✅ 78 programs captured and compiled |
+| VU1 AOT compilation | ✅ 117 programs compiled from 86 captured blocks |
 | Native runner (`ps2run`) build | ✅ passing |
 | Boot: title → difficulty menu → intro cutscenes → Loom Chamber | ✅ verified (frame 3,500) |
 | 3D rendering with characters, textures, animation | ✅ verified in software-GS headless run |
 | SPU2 audio output | ✅ non-silent stereo verified (6.9 s capture) |
 | 989SND bank coverage (`sound/*.bnk`) | ⚠️ WAD `SBP_*` scanner + virtual `.bnk` service implemented; runtime `.bnk` capture pending |
-| Android APK build (`assembleDebug`) | ✅ passing (version 3 / 2.0, arm64-v8a) |
+| Android APK build (`assembleDebug`) | ✅ passing (version 5 / 2.2, arm64-v8a) |
 | 16 KB page compatibility | ✅ `libmain.so` + hook libs `LOAD` align `0x4000`, `extractNativeLibs=true` |
 | Memory-card save/load | ⚠️ implemented, in-game save not yet exercised |
 | First device run (mid-range phone, 8 GB RAM) | ⚠️ booted to gameplay, but too slow to play on v1.0 |
 | Performance update v1.1 (FIFO present, tuned pacing, Android surface cap, runtime deinterlace switch, logcat stats) | ✅ shipped, device re-test pending |
-| **v2.0 Adreno Edition** (ThinLTO, gc-sections, ICF, CPU affinity, DRS, optional Adreno driver + turbo) | ✅ implemented; hardware validation pending |
+| **v2.0 Adreno Edition** (ThinLTO, gc-sections, ICF, CPU affinity, DRS, optional Adreno driver + turbo) | ⚠️ implemented; crashed on a user device at Play |
+| **v2.1 Safety & Universal** (no exported `dlopen`, adapter limits, DRS opt-in, safe mode, boot logcat) | ✅ built; device re-test pending |
 | Mali-G68/G77 30 fps target | ❌ not yet measured on hardware |
-| Dynamic resolution | ✅ swapchain-only 0.6–1.0, default ON on Android, Settings toggle |
+| Dynamic resolution | ✅ swapchain-only 0.6–1.0, opt-in on every platform, Settings toggle |
 
-## v2.0 Adreno Edition
+## v2.2 UI & logs
 
-This release targets Adreno 6xx-class phones (including the 8 GB device that
-first booted v1.0) without breaking Mali or other Vulkan vendors.
+Download: [`v2.2.0`](https://github.com/EvilNathan/gow2-android-apk/releases/tag/v2.2.0)
+(private repo; asset `gow2-debug.apk`, 13,192,346 bytes, sha256
+`0A0F0016756DC1D67A1E5BD67DE23370BE7897BD9C177A122E8953205E66E16A`).
+
+Fifth build. Same engine as 2.1 plus presentation and diagnostics:
+
+- **New app icon.** Adaptive icon (API 26+) with a bronze omega medallion on a
+  deep red radial background; round-icon variant included.
+- **New launcher.** Two-column landscape layout with gold accent bar, gradient
+  title, card panels for controls and diagnostics, state-coloured status dot,
+  custom PLAY/ghost buttons with ripple, and a Material dark theme shared with
+  the dialog.
+- **Log file on external storage.** `PS2_LOG_FILE` is set at application start,
+  so the native `[boot]`/`[gpu]`/`[window]`/`[ee]` breadcrumbs and frame stats
+  are appended (and flushed) to **`/sdcard/gow2/log.txt`**. Android 11+ needs
+  "All files access" for that exact path; the launcher shows the active path,
+  can open the log, copy the path, and offers an **ALLOW /SDCARD WRITE** button.
+  Without the grant the same file is written to
+  `Android/data/com.gow2.android/files/gow2/log.txt`, and the card says so.
+  Java crash traces go to the same file, and the log rotates at 4 MiB
+  (`log.txt.old`).
+- **Version** 5 / 2.2.
+
+## v2.1 Safety & Universal
+
+Download: [`v2.1.0`](https://github.com/EvilNathan/gow2-android-apk/releases/tag/v2.1.0)
+(private repo; asset `gow2-debug.apk`, 13,179,189 bytes, sha256
+`86BC385313A9A64C46D9B95999D6DF67DCD064998736F685B7682BD38A2EDBAF`).
+
+v2.0 crashed on the user's phone as soon as Play was pressed. Two Android-only
+changes were identified as high risk and are fixed or disabled by default in
+2.1. The renderer, the game code and the PS2-side behaviour are unchanged.
+
+- **No more process-wide `dlopen` override.** 2.0 exported `dlopen`/`dlclose`
+  from `libmain.so`; that interposes those symbols for *every* library in the
+  app process. 2.1 keeps the optional custom-driver hook, but wires it with
+  `-Wl,--wrap=dlopen -Wl,--wrap=dlclose`, so only the references linked into
+  `libmain.so` are redirected and nothing is exported.
+- **Device limits instead of desktop defaults.** The device is now requested
+  with exactly the limits the adapter reports (`wgpuAdapterGetLimits`) instead of
+  WebGPU defaults, which mobile drivers can reject; a rejected device used to
+  abort during start-up.
+- **Dynamic resolution is opt-in on all platforms** (was default ON on
+  Android). A live swapchain reconfigure is the graphics path that varies most
+  between drivers, so it now only runs when the Settings box is ticked.
+- **Safe mode.** A new Settings checkbox forces the stock driver, no turbo,
+  no DRS and a fixed 60 Hz cadence, so a device that crashed on 2.0 still boots.
+- **Boot breadcrumbs in logcat.** `[boot]` lines cover args, ISO open, ELF
+  extraction, window/audio, adapter/limits, graphics init and the first frame.
+  `adb logcat -d -s GoW2Stats AndroidRuntime DEBUG` now pinpoints a failure.
+- **Universal by default.** DRS, 30 fps cadence, render scale and stats are
+  vendor-neutral (Adreno, Mali, Xclipse, PowerVR). The driver import and turbo
+  toggle remain Adreno-only because Turnip/libadrenotools is Adreno-specific;
+  the section is now visible on every device with the controls disabled and an
+  explanation instead of being hidden.
+
+
+## v2.0 Adreno Edition (historical)
+
+This release added the mobile performance work on top of v1.1. Its risky parts
+were reworked in 2.1 (see above); the list below describes the feature set.
 
 - **Faster native build:** Android uses ThinLTO, `--gc-sections`, and
   `--icf=all`; set `PS2_ANDROID_LTO=OFF` for quick iteration.
 - **CPU affinity:** EE/render threads use the fastest CPU cluster; VU can use
   all cores. No-op on desktop and fails open when sysfs is restricted.
-- **Dynamic resolution:** swapchain-only 0.6x–1.0x controller, default ON on
-  Android, with a Settings checkbox and `DRS` stats in logcat.
+- **Dynamic resolution:** swapchain-only 0.6x–1.0x controller. Since 2.1 it is
+  opt-in on every platform, with a Settings checkbox and `DRS` stats in logcat.
 - **Optional Adreno driver manager:** import an AdrenoTools zip or
   `libvulkan*.so`; load it rootlessly through libadrenotools. **Turbo clock is
   a separate toggle, default OFF.** Mali/other vendors always use the stock
@@ -54,6 +114,16 @@ first booted v1.0) without breaking Mali or other Vulkan vendors.
 - **989SND bank work:** WAD `SBP_*` scanner, `SBlk` validation, and virtual
   `host1:sound/*.bnk` service. Normal SMPD loads use the `SBP_*` resources
   directly; exact `.bnk` request names still need a hardware capture.
+- **Disc read-ahead:** a 256 KiB aligned window in front of the ISO descriptor
+  serves a CDVD burst with one host read instead of one per sector; on Android
+  each read otherwise crosses into the Storage Access Framework provider.
+  `PS2_DISC_STATS=1` prints the hit rate.
+- **30 Hz cadence:** `--fps-cap 30` (or `PS2_FPS_CADENCE=30`, or the Settings
+  checkbox) halves the vblank rate so logic, SPU2 and presentation stay in step
+  on a phone that cannot hold 60, instead of dropping frames.
+- **Turnip fetch:** `scripts/fetch-turnip.ps1` downloads a pinned, SHA256-checked
+  AdrenoTools package from `K11MCH1/AdrenoToolsDrivers`; import it with
+  **SELECT DRIVER**.
 
 Everything above is implemented and builds, but the performance and driver
 claims are **not hardware-verified**: no Android device was attached to the
@@ -75,12 +145,14 @@ Percentages are honest status, not a compatibility promise.
 | Audio: SPU2 output path | 100% | Non-silent stereo capture verified |
 | Audio: 989SND bank coverage | 65% | `SBP_*` parser and virtual `.bnk` service implemented; SMPD normal bank loads use WAD resources; capture pending |
 | Game compatibility breadth | 60% | Boots into the opening chapter; full game unverified |
-| Performance tuning | 65% | ThinLTO/gc-sections/ICF, CPU affinity, swapchain DRS, optional Adreno driver/turbo; no device metrics yet |
+| Performance tuning | 70% | ThinLTO/gc-sections/ICF, CPU affinity, swapchain DRS, disc read-ahead, 30 Hz cadence, optional Adreno driver/turbo; no device metrics yet |
 | Docs, packaging, legal | 100% | Kit, notices, release, verification log |
 
-**Overall: ~85% engineering complete; hardware validation ~5%** (one phone
-reached gameplay but the v1.0 frame rate was too low; the v1.1/v2.0 performance
-update awaits a re-test with `adb logcat -d -s GoW2Stats` numbers).
+**Overall: ~87% engineering complete; hardware validation ~5%** (one phone
+reached gameplay but the v1.0 frame rate was too low; the v2.1 safety build
+awaits a re-test with `adb logcat -d -s GoW2Stats` numbers). The raw
+Vulkan backend (Fase 3 in `TASKS.md`) is the one large piece still unwritten;
+the shipped renderer remains wgpu.
 
 ## Important files
 
@@ -100,6 +172,7 @@ update awaits a re-test with `adb logcat -d -s GoW2Stats` numbers).
 | [`scripts/extract-disc.ps1`](scripts/extract-disc.ps1) | Copies the boot files out of your ISO |
 | [`scripts/recompile.ps1`](scripts/recompile.ps1) | Translates EE code, records/compiles VU1, builds `ps2run` |
 | [`scripts/build-android.ps1`](scripts/build-android.ps1) | Builds the debug APK |
+| [`scripts/fetch-turnip.ps1`](scripts/fetch-turnip.ps1) | Downloads a pinned, hash-verified Turnip package for the Adreno driver manager |
 | [`scripts/build-all.ps1`](scripts/build-all.ps1) | Runs the whole pipeline |
 | [`scripts/run-headless.ps1`](scripts/run-headless.ps1) | Runs the desktop/headless diagnostic runner |
 | [`android/app/jni/CMakeLists.txt`](android/app/jni/CMakeLists.txt) | Android native build: SDL3 + wgpu-native + libadrenotools + `libmain.so` |
@@ -190,13 +263,15 @@ app's private files directory.
 .\scripts\setup.ps1                 # engine + SDL3 + wgpu-native
 .\scripts\extract-disc.ps1 -Iso "...\God of War II (USA).iso"
 .\scripts\build-tools.ps1           # eerecomp.exe and vurecomp.exe
-.\scripts\recompile.ps1 -Iso "...\God of War II (USA).iso" -Frames 2400
+.\scripts\recompile.ps1 -Iso "...\God of War II (USA).iso" -Preset standard
 .\scripts\build-android.ps1         # dist\gow2-debug.apk
 ```
 
-`recompile.ps1` accepts `-SkipExplore` for a fast build without VU recording.
-Missing VU programs are interpreted at runtime; the game is correct but slower.
-Increase `-Frames` to capture more VU programs and more of the intro.
+`recompile.ps1` accepts `-SkipExplore` for a fast build without VU recording, or
+`-Preset` to pick a capture budget: `quick` (no replay), `standard` (2,400
+frames, the default) and `full` (4,200 frames, more of the intro). Missing VU
+programs are interpreted at runtime; the game is correct but slower. Increase
+`-Frames` to capture more VU programs and more of the intro.
 
 ### Faster rebuilds
 
@@ -265,6 +340,10 @@ The launcher has a **SETTINGS** button:
   swapchain scale (0.6x–1.0x) when the GPU misses frame time; the PS2 render
   scale and game geometry stay unchanged. Works on Adreno and Mali. Passes
   `PS2_DRS=1`.
+- **30 fps cadence** - default OFF. Runs the console at 30 Hz instead of 60
+  (`PS2_FPS_CADENCE=30`). Logic, SPU2 audio and presentation stay in step, so a
+  phone that cannot hold 60 shows every frame evenly instead of juddering; the
+  game itself runs at half speed.
 - **Dim touch controls** - lowers the overlay opacity.
 - **GPU driver (Adreno only)** - import an AdrenoTools `.zip` or a
   `libvulkan*.so` package. The custom driver is opt-in; **USE SYSTEM DRIVER**
@@ -306,6 +385,14 @@ entries to be 16 KB aligned.
 - **CPU affinity:** on Android the EE/render threads are pinned to the fastest
   available CPU cluster and the VU thread is allowed on all cores. This is a
   no-op on desktop and does not assume a specific GPU vendor.
+- **Disc read-ahead:** the ISO reader keeps a 256 KiB aligned window, so a CDVD
+  burst costs one host read instead of one per sector. On Android the descriptor
+  belongs to the Storage Access Framework, where every read crosses a binder
+  boundary; a 300-frame headless run made 533 reads for 14.7 MiB with 75 %
+  served from the window (`PS2_DISC_STATS=1`).
+- **30 Hz cadence:** `--fps-cap 30` doubles the vblank period (EE clock / 30,
+  measured at 9,830,411 cycles per frame) and keeps the 48 kHz SPU2 rate, so
+  audio and presentation stay aligned at half rate.
 - **Dynamic resolution:** enabled by default on Android. It changes only the
   swapchain render target (0.6x–1.0x) based on GPU/present frame time; the
   internal 512x448 GS framebuffer is untouched, so UI and game geometry remain

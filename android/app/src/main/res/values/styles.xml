@@ -1,7 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Base application theme. -->
-    <style name="AppTheme" parent="android:Theme.NoTitleBar.Fullscreen">
-        <!-- Customize your theme here. -->
+    <!-- Dark bronze theme shared by the launcher and the SDL surface. -->
+    <style name="AppTheme" parent="android:Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:colorAccent">#E0B36A</item>
+        <item name="android:colorPrimary">#7A2218</item>
+        <item name="android:colorPrimaryDark">#140A08</item>
+        <item name="android:windowBackground">@drawable/bg_launcher</item>
+        <item name="android:statusBarColor">#140A08</item>
+        <item name="android:navigationBarColor">#140A08</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
 </resources>

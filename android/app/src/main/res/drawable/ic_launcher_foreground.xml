@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Bronze medallion keeps the emblem inside every adaptive-icon mask. -->
+    <path
+        android:pathData="M24,54 a30,30 0 1 0 60,0 a30,30 0 1 0 -60,0"
+        android:fillColor="#CC130806"
+        android:strokeColor="#80E0B36A"
+        android:strokeWidth="1.4" />
+    <path
+        android:pathData="M28,54 a26,26 0 1 0 52,0 a26,26 0 1 0 -52,0"
+        android:strokeColor="#33E0B36A"
+        android:strokeWidth="0.9" />
+
+    <!-- Omega: the God of War mark, with a warm glow under the stroke. -->
+    <path
+        android:pathData="M38,68 A20,20 0 1 1 70,68"
+        android:strokeColor="#40FFC96B"
+        android:strokeWidth="9"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M32,68 L41,68"
+        android:strokeColor="#40FFC96B"
+        android:strokeWidth="9"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M67,68 L76,68"
+        android:strokeColor="#40FFC96B"
+        android:strokeWidth="9"
+        android:strokeLineCap="round" />
+
+    <path
+        android:pathData="M38,68 A20,20 0 1 1 70,68"
+        android:strokeColor="#F2C57C"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M32,68 L41,68"
+        android:strokeColor="#F2C57C"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M67,68 L76,68"
+        android:strokeColor="#F2C57C"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+</vector>

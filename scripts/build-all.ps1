@@ -4,7 +4,9 @@ param(
     [switch]$SkipExplore,
     [switch]$ForceDeps,
     # Reuse a previous VU recording instead of replaying the game.
-    [string]$VuCache = ""
+    [string]$VuCache = "",
+    [ValidateSet("", "quick", "standard", "full")]
+    [string]$Preset = ""
 )
 
 . (Join-Path $PSScriptRoot "common.ps1")
@@ -24,7 +26,7 @@ Write-Step "3/5 Recompiler tools"
 
 
 Write-Step "4/5 Game code and VU programs"
-& (Join-Path $PSScriptRoot "recompile.ps1") -Iso $isoPath -Frames $Frames -SkipExplore:$SkipExplore -VuCache $VuCache
+& (Join-Path $PSScriptRoot "recompile.ps1") -Iso $isoPath -Frames $Frames -SkipExplore:$SkipExplore -VuCache $VuCache -Preset $Preset
 
 
 Write-Step "5/5 Android APK"

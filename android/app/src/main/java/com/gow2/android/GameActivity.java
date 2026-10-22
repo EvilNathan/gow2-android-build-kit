@@ -34,13 +34,25 @@ public final class GameActivity extends SDLActivity {
         applyGpuPreferences();
         SharedPreferences prefs = getSharedPreferences(LauncherActivity.PREFS, MODE_PRIVATE);
         int scale = prefs.getInt(LauncherActivity.KEY_SCALE, 1);
+        boolean safe = prefs.getBoolean(LauncherActivity.KEY_SAFE, false);
         try {
             // Read by the WebGPU renderer when it creates its device.
             Os.setenv("PS2_SCALE", String.valueOf(scale == 2 ? 2 : 1), true);
-            // Swapchain-only dynamic resolution; the PS2 framebuffer stays 1x/2x.
-            Os.setenv("PS2_DRS", prefs.getBoolean(LauncherActivity.KEY_DRS, true) ? "1" : "0", true);
+            // Safe mode drops every optional GPU path (custom driver, turbo, DRS,
+            // half-rate cadence) so a device that crashed on 2.0 still boots.
+            Os.setenv("PS2_SAFE", safe ? "1" : "0", true);
+            // Swapchain-only dynamic resolution; opt-in, the PS2 framebuffer stays 1x/2x.
+            Os.setenv("PS2_DRS", !safe && prefs.getBoolean(LauncherActivity.KEY_DRS, false) ? "1" : "0", true);
+            // Optional half-rate cadence for phones that cannot hold 60 fps.
+            Os.setenv("PS2_FPS_CADENCE",
+                    !safe && prefs.getBoolean(LauncherActivity.KEY_FPS30, false) ? "30" : "60", true);
         } catch (Exception ignored) {
         }
+        LogFile.append(this, "[app] game start: iso=" + sIsoSize + " bytes, scale=" + scale
+                + ", safe=" + safe
+                + ", drs=" + prefs.getBoolean(LauncherActivity.KEY_DRS, false)
+                + ", fps30=" + prefs.getBoolean(LauncherActivity.KEY_FPS30, false)
+                + ", custom_driver=" + (prefs.getString(LauncherActivity.KEY_DRIVER_PATH, null) != null));
         super.onCreate(savedInstanceState);
         float alpha = getSharedPreferences(LauncherActivity.PREFS, MODE_PRIVATE)
                 .getFloat(LauncherActivity.KEY_TOUCH_ALPHA, 0.86f);
@@ -51,9 +63,16 @@ public final class GameActivity extends SDLActivity {
                 RelativeLayout.LayoutParams.MATCH_PARENT));
     }
 
+    @Override
+    protected void onDestroy() {
+        LogFile.append(this, "[app] game activity destroyed");
+        super.onDestroy();
+    }
+
     private void applyGpuPreferences() {
         try {
             SharedPreferences prefs = getSharedPreferences(LauncherActivity.PREFS, MODE_PRIVATE);
+            if (prefs.getBoolean(LauncherActivity.KEY_SAFE, false)) return; // safe mode: stock driver, no turbo
             if (!LauncherActivity.isAdreno()) return; // Mali and other vendors keep the stock driver
             String driver = prefs.getString(LauncherActivity.KEY_DRIVER_PATH, null);
             if (driver != null) {

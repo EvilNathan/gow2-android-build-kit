@@ -30,9 +30,11 @@ if(ANDROID AND TARGET main)
     # Always compile the bridge: without adrenotools it forwards dlopen()
     # straight to the system loader, and ps2_android_vulkan_prepare() is a no-op.
     target_sources(main PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../../../engine/host/android_vulkan_loader.cpp")
-    # Make wgpu's dlopen("libvulkan.so.1") bind to the interposer in
-    # android_vulkan_loader.cpp instead of going through libdl directly.
-    target_link_options(main PRIVATE "-Wl,-Bsymbolic-functions")
+    # Route only the dlopen/dlclose references that live inside libmain.so
+    # (wgpu, SDL, the emulator) through android_vulkan_loader.cpp. Do NOT export
+    # dlopen/dlclose: a process-wide override can break unrelated loaders on
+    # devices we cannot test.
+    target_link_options(main PRIVATE "-Wl,--wrap=dlopen" "-Wl,--wrap=dlclose")
 endif()
 if(ANDROID AND EXISTS "${PS2_ADRENOTOOLS_DIR}/CMakeLists.txt" AND TARGET main)
     add_subdirectory("${PS2_ADRENOTOOLS_DIR}" "${CMAKE_BINARY_DIR}/adrenotools")

@@ -2,18 +2,27 @@ package com.gow2.android;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ContentResolver;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
+import android.graphics.LinearGradient;
+import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
 import android.database.Cursor;
+import android.text.Spannable;
+import android.text.SpannableStringBuilder;
+import android.text.style.ForegroundColorSpan;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -43,6 +52,8 @@ public final class LauncherActivity extends Activity {
     static final String KEY_DRIVER_PATH = "driver_path";
     static final String KEY_TURBO = "turbo_clock";
     static final String KEY_DRS = "dynamic_resolution";
+    static final String KEY_SAFE = "safe_mode";
+    static final String KEY_FPS30 = "fps_cadence_30";
     private static final int REQ_ISO = 1001;
     private static final int REQ_DRIVER = 1002;
 
@@ -55,89 +66,289 @@ public final class LauncherActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(buildUi());
         refresh();
+        LogFile.append(this, "[app] launcher opened (log " + LogFile.path(this) + ")");
     }
 
+    private TextView logPathView;
+
     private View buildUi() {
-        final int pad = dp(28);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundResource(R.drawable.bg_launcher);
+        scroll.setClipToPadding(false);
+
         LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
+        root.setOrientation(LinearLayout.HORIZONTAL);
         root.setGravity(Gravity.CENTER_VERTICAL);
-        root.setPadding(pad, dp(12), pad, dp(12));
-        GradientDrawable background = new GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                new int[]{Color.rgb(24, 10, 8), Color.rgb(72, 18, 12), Color.rgb(10, 8, 8)});
-        root.setBackground(background);
+        root.setPadding(dp(28), dp(16), dp(28), dp(16));
+        scroll.addView(root, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout left = new LinearLayout(this);
+        left.setOrientation(LinearLayout.VERTICAL);
+        left.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(left, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.05f));
+
+        View accent = new View(this);
+        accent.setBackgroundResource(R.drawable.accent_bar);
+        LinearLayout.LayoutParams accentParams = new LinearLayout.LayoutParams(dp(56), dp(3));
+        accentParams.bottomMargin = dp(14);
+        left.addView(accent, accentParams);
 
         TextView title = new TextView(this);
         title.setText("GOD OF WAR II");
-        title.setTextColor(Color.rgb(231, 201, 151));
+        title.setTextColor(Color.WHITE);
         title.setTypeface(Typeface.create("serif", Typeface.BOLD));
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 38);
-        title.setLetterSpacing(0.08f);
-        title.setGravity(Gravity.CENTER_HORIZONTAL);
-        root.addView(title, matchWrap());
+        title.setLetterSpacing(0.09f);
+        left.addView(title, matchWrap());
+        title.post(() -> title.getPaint().setShader(new LinearGradient(
+                0, 0, 0, title.getTextSize(),
+                0xFFF7E3BC, 0xFFC48C3C, Shader.TileMode.CLAMP)));
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Native Android port");
-        subtitle.setTextColor(Color.rgb(188, 164, 130));
-        subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        subtitle.setGravity(Gravity.CENTER_HORIZONTAL);
+        subtitle.setText("NATIVE ANDROID PORT  \u00b7  BUILT FROM YOUR OWN DISC");
+        subtitle.setTextColor(0xFFC8AE86);
+        subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
+        subtitle.setLetterSpacing(0.16f);
         LinearLayout.LayoutParams subParams = matchWrap();
-        subParams.topMargin = dp(2);
-        root.addView(subtitle, subParams);
+        subParams.topMargin = dp(4);
+        left.addView(subtitle, subParams);
 
         TextView hint = new TextView(this);
-        hint.setText("Select your own legally acquired God of War II (USA) ISO. The game is read directly from the file; it is never copied or uploaded.");
-        hint.setTextColor(Color.rgb(190, 184, 176));
-        hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        hint.setGravity(Gravity.CENTER_HORIZONTAL);
+        hint.setText("Select your legally acquired God of War II (USA) ISO. The disc is read in place - never copied or uploaded.");
+        hint.setTextColor(0xFFBBB2A6);
+        hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        hint.setLineSpacing(dp(2), 1f);
         LinearLayout.LayoutParams hintParams = matchWrap();
-        hintParams.topMargin = dp(18);
-        hintParams.bottomMargin = dp(14);
-        root.addView(hint, hintParams);
+        hintParams.topMargin = dp(14);
+        left.addView(hint, hintParams);
 
         status = new TextView(this);
-        status.setTextColor(Color.rgb(210, 205, 196));
         status.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        status.setGravity(Gravity.CENTER_HORIZONTAL);
         LinearLayout.LayoutParams statusParams = matchWrap();
-        statusParams.bottomMargin = dp(14);
-        root.addView(status, statusParams);
+        statusParams.topMargin = dp(16);
+        statusParams.bottomMargin = dp(10);
+        left.addView(status, statusParams);
 
-        play = makeButton("PLAY", Color.rgb(122, 34, 24));
+        play = makePrimaryButton("PLAY");
         play.setOnClickListener(v -> launchGame());
-        root.addView(play, buttonParams());
+        left.addView(play, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(60)));
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams rowParams = matchWrap();
         rowParams.topMargin = dp(10);
-        root.addView(buttons, rowParams);
+        left.addView(buttons, rowParams);
 
-        choose = makeButton("SELECT ISO", Color.rgb(58, 54, 50));
+        choose = makeGhostButton("SELECT ISO");
         choose.setOnClickListener(v -> pickIso());
-        LinearLayout.LayoutParams chooseParams = new LinearLayout.LayoutParams(
-                0, dp(54), 1.0f);
-        buttons.addView(choose, chooseParams);
+        buttons.addView(choose, new LinearLayout.LayoutParams(0, dp(50), 1.0f));
 
-        Button settings = makeButton("SETTINGS", Color.rgb(42, 40, 38));
+        Button settings = makeGhostButton("SETTINGS");
         settings.setOnClickListener(v -> showSettings());
-        LinearLayout.LayoutParams settingsParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, dp(54));
+        LinearLayout.LayoutParams settingsParams = new LinearLayout.LayoutParams(0, dp(50), 1.0f);
         settingsParams.leftMargin = dp(10);
         buttons.addView(settings, settingsParams);
 
-        TextView controls = new TextView(this);
-        controls.setText("Touch: left side = movement, right diamond = face buttons, START/SELECT at the bottom. A Bluetooth/USB gamepad is supported.");
-        controls.setTextColor(Color.rgb(150, 145, 138));
-        controls.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        controls.setGravity(Gravity.CENTER_HORIZONTAL);
-        LinearLayout.LayoutParams controlsParams = matchWrap();
-        controlsParams.topMargin = dp(18);
-        root.addView(controls, controlsParams);
+        TextView footer = new TextView(this);
+        footer.setText("v" + versionName() + "  \u00b7  arm64-v8a  \u00b7  Vulkan via wgpu-native");
+        footer.setTextColor(0xFF7E766B);
+        footer.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
+        LinearLayout.LayoutParams footerParams = matchWrap();
+        footerParams.topMargin = dp(12);
+        left.addView(footer, footerParams);
 
-        return root;
+        LinearLayout right = new LinearLayout(this);
+        right.setOrientation(LinearLayout.VERTICAL);
+        right.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams rightParams = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.95f);
+        rightParams.leftMargin = dp(26);
+        root.addView(right, rightParams);
+
+        right.addView(makeCard("CONTROLS",
+                "Left half of the screen: movement\n"
+                        + "Right diamond: face buttons\n"
+                        + "START / SELECT strip at the bottom\n"
+                        + "Bluetooth / USB gamepad is supported"));
+
+        LinearLayout logCard = makeCard("DIAGNOSTIC LOG", null);
+        logPathView = new TextView(this);
+        logPathView.setTextColor(0xFFBBB2A6);
+        logPathView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
+        logPathView.setTypeface(Typeface.MONOSPACE);
+        logPathView.setTextIsSelectable(true);
+        LinearLayout.LayoutParams pathParams = matchWrap();
+        pathParams.topMargin = dp(7);
+        logCard.addView(logPathView, pathParams);
+
+        LinearLayout logButtons = new LinearLayout(this);
+        logButtons.setOrientation(LinearLayout.HORIZONTAL);
+        Button viewLog = makeGhostButton("VIEW LOG");
+        viewLog.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        viewLog.setOnClickListener(v -> showLog());
+        logButtons.addView(viewLog, new LinearLayout.LayoutParams(0, dp(44), 1f));
+        Button copyPath = makeGhostButton("COPY PATH");
+        copyPath.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        copyPath.setOnClickListener(v -> {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (clipboard != null) {
+                clipboard.setPrimaryClip(ClipData.newPlainText("GoW2 log", LogFile.path(this)));
+                Toast.makeText(this, "Log path copied", Toast.LENGTH_SHORT).show();
+            }
+        });
+        LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        copyParams.leftMargin = dp(8);
+        logButtons.addView(copyPath, copyParams);
+        LinearLayout.LayoutParams logButtonParams = matchWrap();
+        logButtonParams.topMargin = dp(10);
+        logCard.addView(logButtons, logButtonParams);
+
+        if (!LogFile.usingShared(this)) {
+            Button allow = makeGhostButton("ALLOW /SDCARD WRITE");
+            allow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            allow.setOnClickListener(v -> requestSharedStorage());
+            LinearLayout.LayoutParams allowParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
+            allowParams.topMargin = dp(8);
+            logCard.addView(allow, allowParams);
+        }
+
+        LinearLayout.LayoutParams logCardParams = matchWrap();
+        logCardParams.topMargin = dp(12);
+        right.addView(logCard, logCardParams);
+
+        return scroll;
     }
+
+    private LinearLayout makeCard(String heading, String body) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackgroundResource(R.drawable.card_bg);
+        card.setPadding(dp(16), dp(14), dp(16), dp(14));
+
+        TextView headingView = new TextView(this);
+        headingView.setText(heading);
+        headingView.setTextColor(0xFFE0B36A);
+        headingView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        headingView.setLetterSpacing(0.14f);
+        card.addView(headingView, matchWrap());
+
+        if (body != null) {
+            TextView bodyView = new TextView(this);
+            bodyView.setText(body);
+            bodyView.setTextColor(0xFFCFC7BC);
+            bodyView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+            bodyView.setLineSpacing(dp(2), 1f);
+            LinearLayout.LayoutParams bodyParams = matchWrap();
+            bodyParams.topMargin = dp(7);
+            card.addView(bodyView, bodyParams);
+        }
+        return card;
+    }
+
+    private Button makePrimaryButton(String text) {
+        Button button = new Button(this);
+        button.setText(text);
+        button.setTextColor(0xFFF7E3BC);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        button.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
+        button.setLetterSpacing(0.18f);
+        button.setAllCaps(false);
+        GradientDrawable shape = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{0xFFB8452A, 0xFF741E12});
+        shape.setCornerRadius(dp(14));
+        shape.setStroke(dp(1), 0xB3E2B86C);
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(0x40FFFFFF), shape, null));
+        button.setElevation(dp(6));
+        button.setStateListAnimator(null);
+        return button;
+    }
+
+    private Button makeGhostButton(String text) {
+        Button button = new Button(this);
+        button.setText(text);
+        button.setTextColor(0xFFE8DCC8);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        button.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
+        button.setLetterSpacing(0.10f);
+        button.setAllCaps(false);
+        GradientDrawable shape = new GradientDrawable();
+        shape.setColor(0x1FFFFFFF);
+        shape.setCornerRadius(dp(12));
+        shape.setStroke(dp(1), 0x4DD9A24A);
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), shape, null));
+        button.setStateListAnimator(null);
+        return button;
+    }
+
+    private void setStatus(String text, boolean ready, boolean warning) {
+        SpannableStringBuilder builder = new SpannableStringBuilder("\u25cf  " + text);
+        int dot = ready ? 0xFF86D68F : (warning ? 0xFFE0B45A : 0xFFD06A5A);
+        builder.setSpan(new ForegroundColorSpan(dot), 0, 1, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        status.setText(builder);
+        status.setTextColor(0xFFD6CEC2);
+    }
+
+    private void refreshLogPath() {
+        if (logPathView == null) return;
+        String path = LogFile.path(this);
+        boolean shared = LogFile.usingShared(this);
+        logPathView.setText((shared ? "" : "Fallback path (grant all-files access for /sdcard/gow2/log.txt):\n")
+                + (path == null ? "unavailable" : path));
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception error) {
+            return "?";
+        }
+    }
+
+    private void showLog() {
+        String tail = LogFile.tail(this, 48 * 1024);
+        if (tail.isEmpty()) tail = "The log is empty. Start the game once, then open this again.";
+        TextView text = new TextView(this);
+        text.setText(tail);
+        text.setTextColor(0xFFD8D2C8);
+        text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
+        text.setTypeface(Typeface.MONOSPACE);
+        text.setTextIsSelectable(true);
+        int pad = dp(14);
+        text.setPadding(pad, pad, pad, pad);
+        ScrollView scroller = new ScrollView(this);
+        scroller.addView(text);
+        new AlertDialog.Builder(this)
+                .setTitle("Log - " + LogFile.path(this))
+                .setView(scroller)
+                .setPositiveButton("Close", null)
+                .show();
+    }
+
+    private void requestSharedStorage() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                startActivity(new Intent(
+                        android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:" + getPackageName())));
+                Toast.makeText(this, "Grant \"All files access\", then reopen the app", Toast.LENGTH_LONG).show();
+                return;
+            } catch (Exception ignored) {
+            }
+            try {
+                startActivity(new Intent(
+                        android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+                return;
+            } catch (Exception ignored) {
+            }
+        }
+        Toast.makeText(this, "Log path: " + LogFile.path(this), Toast.LENGTH_LONG).show();
+    }
+
 
     private LinearLayout.LayoutParams matchWrap() {
         return new LinearLayout.LayoutParams(
@@ -154,14 +365,14 @@ public final class LauncherActivity extends Activity {
         Button b = new Button(this);
         b.setText(text);
         b.setTextColor(Color.WHITE);
-        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         b.setAllCaps(false);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
         GradientDrawable shape = new GradientDrawable();
         shape.setColor(color);
-        shape.setCornerRadius(dp(8));
-        shape.setStroke(dp(1), Color.rgb(205, 160, 92));
-        b.setBackground(shape);
+        shape.setCornerRadius(dp(12));
+        shape.setStroke(dp(1), 0x66D9A24A);
+        b.setBackground(new RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), shape, null));
         b.setStateListAnimator(null);
         return b;
     }
@@ -222,24 +433,56 @@ public final class LauncherActivity extends Activity {
         content.addView(dim, dimParams);
 
         CheckBox drs = new CheckBox(this);
-        drs.setText("Dynamic resolution (recommended)");
+        drs.setText("Dynamic resolution (optional)");
         drs.setTextColor(Color.rgb(230, 224, 214));
-        drs.setChecked(prefs.getBoolean(KEY_DRS, true));
+        drs.setChecked(prefs.getBoolean(KEY_DRS, false));
         LinearLayout.LayoutParams drsParams = matchWrap();
         drsParams.topMargin = dp(8);
         content.addView(drs, drsParams);
 
         TextView drsHint = new TextView(this);
-        drsHint.setText("Lowers only the Android swapchain scale when the GPU misses frame time. "
-                + "PS2 render scale and image geometry stay unchanged; Mali and Adreno both use it.");
+        drsHint.setText("Off by default: it reconfigures the Android swapchain while the game runs. "
+                + "Turn it on if the GPU has headroom problems; PS2 render scale and geometry stay unchanged. "
+                + "Works with any Vulkan driver (Adreno, Mali, Xclipse, PowerVR).");
         drsHint.setTextColor(Color.rgb(160, 154, 146));
         drsHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         content.addView(drsHint, matchWrap());
 
+        CheckBox fps30 = new CheckBox(this);
+        fps30.setText("30 fps cadence (halves the console rate)");
+        fps30.setTextColor(Color.rgb(230, 224, 214));
+        fps30.setChecked(prefs.getBoolean(KEY_FPS30, false));
+        LinearLayout.LayoutParams fpsParams = matchWrap();
+        fpsParams.topMargin = dp(8);
+        content.addView(fps30, fpsParams);
+
+        TextView fpsHint = new TextView(this);
+        fpsHint.setText("For phones that cannot hold 60 fps. Runs the game at a steady 30 Hz instead of "
+                + "dropping frames at 60, so motion stays even (the game runs at half speed).");
+        fpsHint.setTextColor(Color.rgb(160, 154, 146));
+        fpsHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        content.addView(fpsHint, matchWrap());
+
+        CheckBox safe = new CheckBox(this);
+        safe.setText("Safe mode (disable GPU extras)");
+        safe.setTextColor(Color.rgb(230, 224, 214));
+        safe.setChecked(prefs.getBoolean(KEY_SAFE, false));
+        LinearLayout.LayoutParams safeParams = matchWrap();
+        safeParams.topMargin = dp(12);
+        content.addView(safe, safeParams);
+
+        TextView safeHint = new TextView(this);
+        safeHint.setText("For troubleshooting: ignores the custom driver and turbo clock, forces the "
+                + "system driver, 60 Hz and a fixed 1x swapchain. Leave off for normal play.");
+        safeHint.setTextColor(Color.rgb(160, 154, 146));
+        safeHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        content.addView(safeHint, matchWrap());
+
+        final boolean adreno = isAdreno();
         final CheckBox turbo;
-        if (isAdreno()) {
+        {
             TextView driverLabel = new TextView(this);
-            driverLabel.setText("GPU driver (Adreno)");
+            driverLabel.setText("GPU driver (optional, Adreno/Turnip only)");
             driverLabel.setTextColor(Color.rgb(205, 170, 120));
             driverLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
             LinearLayout.LayoutParams driverLabelParams = matchWrap();
@@ -255,8 +498,12 @@ public final class LauncherActivity extends Activity {
             content.addView(driverStatus, matchWrap());
 
             TextView driverHint = new TextView(this);
-            driverHint.setText("Optional. Import an AdrenoTools driver package (.zip) or a libvulkan*.so file. "
-                    + "Leave this on the system driver if the custom one is slower or unstable.");
+            driverHint.setText(adreno
+                    ? "Import an AdrenoTools package (.zip) or a libvulkan*.so, or leave the system driver. "
+                      + "A custom driver is never required."
+                    : "Not applicable on this GPU: " + Build.MANUFACTURER + " " + Build.MODEL
+                      + " uses its system Vulkan driver, which is fully supported. "
+                      + "Dynamic resolution, 30 fps cadence and stats work on every vendor.");
             driverHint.setTextColor(Color.rgb(160, 154, 146));
             driverHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
             LinearLayout.LayoutParams driverHintParams = matchWrap();
@@ -265,6 +512,8 @@ public final class LauncherActivity extends Activity {
 
             Button pickDriver = makeButton("SELECT DRIVER (.zip / .so)", Color.rgb(58, 54, 50));
             pickDriver.setOnClickListener(v -> pickDriver());
+            pickDriver.setEnabled(adreno);
+            pickDriver.setAlpha(adreno ? 1.0f : 0.4f);
             LinearLayout.LayoutParams pickParams = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, dp(48));
             content.addView(pickDriver, pickParams);
@@ -281,14 +530,13 @@ public final class LauncherActivity extends Activity {
             content.addView(systemDriver, systemParams);
 
             turbo = new CheckBox(this);
-            turbo.setText("Turbo clock (force maximum GPU clocks)");
+            turbo.setText("Turbo clock (force maximum GPU clocks, Adreno only)");
             turbo.setTextColor(Color.rgb(230, 224, 214));
             turbo.setChecked(prefs.getBoolean(KEY_TURBO, false));
+            turbo.setEnabled(adreno);
             LinearLayout.LayoutParams turboParams = matchWrap();
             turboParams.topMargin = dp(10);
             content.addView(turbo, turboParams);
-        } else {
-            turbo = null;
         }
 
         TextView note = new TextView(this);
@@ -310,8 +558,10 @@ public final class LauncherActivity extends Activity {
                             .putBoolean(KEY_WIDESCREEN, widescreen.isChecked())
                             .putInt(KEY_SCALE, scales.getCheckedRadioButtonId() == 2 ? 2 : 1)
                             .putFloat(KEY_TOUCH_ALPHA, dim.isChecked() ? 0.55f : 0.86f)
-                            .putBoolean(KEY_DRS, drs.isChecked())
-                            .putBoolean(KEY_TURBO, turbo != null && turbo.isChecked())
+                            .putBoolean(KEY_DRS, drs.isChecked() && !safe.isChecked())
+                            .putBoolean(KEY_FPS30, fps30.isChecked() && !safe.isChecked())
+                            .putBoolean(KEY_TURBO, turbo != null && turbo.isChecked() && !safe.isChecked())
+                            .putBoolean(KEY_SAFE, safe.isChecked())
                             .apply();
                     refresh();
                 })
@@ -413,9 +663,10 @@ public final class LauncherActivity extends Activity {
     }
 
     private void refresh() {
+        refreshLogPath();
         Uri uri = savedUri();
         if (uri == null) {
-            status.setText("No ISO selected");
+            setStatus("No ISO selected - tap SELECT ISO", false, false);
             play.setEnabled(false);
             play.setAlpha(0.45f);
             choose.setText("SELECT ISO");
@@ -426,12 +677,12 @@ public final class LauncherActivity extends Activity {
             SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
             String aspect = prefs.getBoolean(KEY_WIDESCREEN, false) ? "16:9" : "4:3";
             int scale = prefs.getInt(KEY_SCALE, 1);
-            status.setText("Ready: " + formatSize(size) + "  •  " + aspect + "  •  " + scale + "x");
+            setStatus("Ready  \u00b7  " + formatSize(size) + "  \u00b7  " + aspect + "  \u00b7  " + scale + "x", true, false);
             play.setEnabled(true);
             play.setAlpha(1.0f);
             choose.setText("CHANGE ISO");
         } else {
-            status.setText("The selected file is no longer readable. Select it again.");
+            setStatus("The selected file is no longer readable. Select it again.", false, true);
             play.setEnabled(false);
             play.setAlpha(0.45f);
             choose.setText("SELECT ISO");
@@ -482,14 +733,17 @@ public final class LauncherActivity extends Activity {
         } catch (Exception ignored) {
         }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_ISO_URI, uri.toString()).apply();
+        long selectedSize = fileSize(uri);
+        LogFile.append(this, "[app] ISO selected: " + displayName(uri) + " (" + selectedSize + " bytes)");
         refresh();
-        if (fileSize(uri) <= 0) {
+        if (selectedSize <= 0) {
             Toast.makeText(this, "Could not read that file", Toast.LENGTH_LONG).show();
         }
     }
 
     private void launchGame() {
         if (savedUri() == null) return;
+        LogFile.append(this, "[app] Play pressed");
         startActivity(new Intent(this, GameActivity.class));
     }
 }
