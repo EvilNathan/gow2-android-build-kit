@@ -41,6 +41,13 @@ Set-Content -Path $localProperties -Value "sdk.dir=$sdkGradle" -Encoding ASCII
 Write-Step "Building the Android APK"
 Push-Location $android
 try {
+    $variant = if ($Release) { "release" } else { "debug" }
+    # zipflinger can leave stale padding when it overwrites an existing APK
+    # in place (a subsequent build can grow to twice the real size). Remove
+    # this variant's output directory so every package is written fresh while
+    # keeping the incremental native build and resources intact.
+    $variantDir = Join-Path $android "app\build\outputs\apk\$variant"
+    if (Test-Path $variantDir) { Remove-Item $variantDir -Recurse -Force }
     $task = if ($Release) { ":app:assembleRelease" } else { ":app:assembleDebug" }
     & .\gradlew.bat --no-daemon $task
     if ($LASTEXITCODE -ne 0) { throw "Gradle failed with code $LASTEXITCODE." }

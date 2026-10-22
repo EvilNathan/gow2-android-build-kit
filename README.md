@@ -26,14 +26,38 @@ window, audio device, gamepads, and lifecycle handling.
 | Boot: title → difficulty menu → intro cutscenes → Loom Chamber | ✅ verified (frame 3,500) |
 | 3D rendering with characters, textures, animation | ✅ verified in software-GS headless run |
 | SPU2 audio output | ✅ non-silent stereo verified (6.9 s capture) |
-| 989SND bank coverage (`sound/*.bnk`) | ⚠️ partial |
-| Android APK build (`assembleDebug`) | ✅ passing (13.5 MB, arm64-v8a) |
-| 16 KB page compatibility | ✅ `LOAD` align `0x4000`, `extractNativeLibs=true` |
+| 989SND bank coverage (`sound/*.bnk`) | ⚠️ WAD `SBP_*` scanner + virtual `.bnk` service implemented; runtime `.bnk` capture pending |
+| Android APK build (`assembleDebug`) | ✅ passing (version 3 / 2.0, arm64-v8a) |
+| 16 KB page compatibility | ✅ `libmain.so` + hook libs `LOAD` align `0x4000`, `extractNativeLibs=true` |
 | Memory-card save/load | ⚠️ implemented, in-game save not yet exercised |
 | First device run (mid-range phone, 8 GB RAM) | ⚠️ booted to gameplay, but too slow to play on v1.0 |
 | Performance update v1.1 (FIFO present, tuned pacing, Android surface cap, runtime deinterlace switch, logcat stats) | ✅ shipped, device re-test pending |
+| **v2.0 Adreno Edition** (ThinLTO, gc-sections, ICF, CPU affinity, DRS, optional Adreno driver + turbo) | ✅ implemented; hardware validation pending |
 | Mali-G68/G77 30 fps target | ❌ not yet measured on hardware |
-| Dynamic resolution | ❌ not implemented |
+| Dynamic resolution | ✅ swapchain-only 0.6–1.0, default ON on Android, Settings toggle |
+
+## v2.0 Adreno Edition
+
+This release targets Adreno 6xx-class phones (including the 8 GB device that
+first booted v1.0) without breaking Mali or other Vulkan vendors.
+
+- **Faster native build:** Android uses ThinLTO, `--gc-sections`, and
+  `--icf=all`; set `PS2_ANDROID_LTO=OFF` for quick iteration.
+- **CPU affinity:** EE/render threads use the fastest CPU cluster; VU can use
+  all cores. No-op on desktop and fails open when sysfs is restricted.
+- **Dynamic resolution:** swapchain-only 0.6x–1.0x controller, default ON on
+  Android, with a Settings checkbox and `DRS` stats in logcat.
+- **Optional Adreno driver manager:** import an AdrenoTools zip or
+  `libvulkan*.so`; load it rootlessly through libadrenotools. **Turbo clock is
+  a separate toggle, default OFF.** Mali/other vendors always use the stock
+  driver; a failed import/load falls back to it.
+- **989SND bank work:** WAD `SBP_*` scanner, `SBlk` validation, and virtual
+  `host1:sound/*.bnk` service. Normal SMPD loads use the `SBP_*` resources
+  directly; exact `.bnk` request names still need a hardware capture.
+
+Everything above is implemented and builds, but the performance and driver
+claims are **not hardware-verified**: no Android device was attached to the
+build machine. See `VERIFICATION.md`.
 
 ## Port progress
 
@@ -49,13 +73,13 @@ Percentages are honest status, not a compatibility promise.
 | Android app shell (SAF, touch, gamepad, lifecycle) | 95% | Built and statically checked; not run on hardware |
 | Saves (MC2_D memory card) | 80% | Card HLE present; in-game save not yet verified |
 | Audio: SPU2 output path | 100% | Non-silent stereo capture verified |
-| Audio: 989SND bank coverage | 40% | WAD-backed audio works; `sound/*.bnk` requests unserved |
+| Audio: 989SND bank coverage | 65% | `SBP_*` parser and virtual `.bnk` service implemented; SMPD normal bank loads use WAD resources; capture pending |
 | Game compatibility breadth | 60% | Boots into the opening chapter; full game unverified |
-| Performance tuning | 45% | Pacing/present work shipped; no device metrics yet, no dynamic resolution |
+| Performance tuning | 65% | ThinLTO/gc-sections/ICF, CPU affinity, swapchain DRS, optional Adreno driver/turbo; no device metrics yet |
 | Docs, packaging, legal | 100% | Kit, notices, release, verification log |
 
-**Overall: ~82% engineering complete; hardware validation ~5%** (one phone
-reached gameplay but the v1.0 frame rate was too low; the v1.1 performance
+**Overall: ~85% engineering complete; hardware validation ~5%** (one phone
+reached gameplay but the v1.0 frame rate was too low; the v1.1/v2.0 performance
 update awaits a re-test with `adb logcat -d -s GoW2Stats` numbers).
 
 ## Important files
@@ -64,20 +88,24 @@ update awaits a re-test with `adb logcat -d -s GoW2Stats` numbers).
 | --- | --- |
 | [`README.md`](README.md) | This document |
 | [`VERIFICATION.md`](VERIFICATION.md) | What was actually tested and what was not |
+| [`TASKS.md`](TASKS.md) | v2.0 phase tracker and 989SND findings |
 | [`NOTICE.md`](NOTICE.md) | Dependency notices and trademark statement |
 | [`LICENSE`](LICENSE) | MIT license for this kit |
 | [`LICENSE-ENGINE.txt`](LICENSE-ENGINE.txt) | Upstream MIT license (`ps2-web-recomp`) |
 | [`third_party/LICENSE-SDL3.txt`](third_party/LICENSE-SDL3.txt) | zlib license for the bundled SDL Java classes |
 | [`engine.patch`](engine.patch) | All engine changes, applied by `setup.ps1` |
 | [`scripts/common.ps1`](scripts/common.ps1) | Shared paths and helpers |
-| [`scripts/setup.ps1`](scripts/setup.ps1) | Clones the pinned engine, fetches SDL3 + wgpu-native |
+| [`scripts/setup.ps1`](scripts/setup.ps1) | Clones the pinned engine, fetches SDL3 + wgpu-native + libadrenotools |
 | [`scripts/build-tools.ps1`](scripts/build-tools.ps1) | Builds `eerecomp.exe` and `vurecomp.exe` |
 | [`scripts/extract-disc.ps1`](scripts/extract-disc.ps1) | Copies the boot files out of your ISO |
 | [`scripts/recompile.ps1`](scripts/recompile.ps1) | Translates EE code, records/compiles VU1, builds `ps2run` |
 | [`scripts/build-android.ps1`](scripts/build-android.ps1) | Builds the debug APK |
 | [`scripts/build-all.ps1`](scripts/build-all.ps1) | Runs the whole pipeline |
 | [`scripts/run-headless.ps1`](scripts/run-headless.ps1) | Runs the desktop/headless diagnostic runner |
-| [`android/app/jni/CMakeLists.txt`](android/app/jni/CMakeLists.txt) | Android native build: SDL3 + wgpu-native + `libmain.so` |
+| [`android/app/jni/CMakeLists.txt`](android/app/jni/CMakeLists.txt) | Android native build: SDL3 + wgpu-native + libadrenotools + `libmain.so` |
+| [`engine/host/android_vulkan_loader.cpp`](engine/host/android_vulkan_loader.cpp) | Opt-in Adreno driver loader and `dlopen` bridge |
+| [`engine/third_party/libadrenotools/`](engine/third_party/libadrenotools) | Vendored BSD-2 rootless driver loader and hooks |
+| [`engine/runtime/src/iop/io.cpp`](engine/runtime/src/iop/io.cpp) | IOP file service, WAD `SBP_*` scanner, virtual `.bnk` serving |
 | [`android/app/src/main/AndroidManifest.xml`](android/app/src/main/AndroidManifest.xml) | Activities, Vulkan/gamepad features |
 | [`android/app/src/main/java/com/gow2/android/`](android/app/src/main/java/com/gow2/android) | Launcher, SAF picker, game activity, touch overlay |
 | [`tools/toc.py`](tools/toc.py) | Inspects `GODOFWAR.TOC` entries and partitions |
@@ -138,7 +166,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\build-all.ps1 -Iso "D:\Games\God of War II (USA).iso"
 ```
 
-The first run downloads the pinned engine and two dependencies, builds the
+The first run downloads the pinned engine and three dependencies, builds the
 recompilers, extracts the boot files, translates the game, records VU1 programs,
 and builds a debug APK. Expect roughly 20-90 minutes depending on CPU and the
 exploration length. The exploration run is CPU-heavy because this build
@@ -233,7 +261,18 @@ The launcher has a **SETTINGS** button:
 - **Widescreen (16:9)** - passes `--widescreen`; default is the game's 4:3.
 - **Render scale 1x / 2x** - sets `PS2_SCALE` for the internal GS buffers.
   1x is strongly recommended on Mali-G68/G77. Changes apply at the next start.
+- **Dynamic resolution (recommended)** - default ON. Lowers only the Android
+  swapchain scale (0.6x–1.0x) when the GPU misses frame time; the PS2 render
+  scale and game geometry stay unchanged. Works on Adreno and Mali. Passes
+  `PS2_DRS=1`.
 - **Dim touch controls** - lowers the overlay opacity.
+- **GPU driver (Adreno only)** - import an AdrenoTools `.zip` or a
+  `libvulkan*.so` package. The custom driver is opt-in; **USE SYSTEM DRIVER**
+  removes it. Mali, PowerVR and other vendors always use the stock driver.
+- **Turbo clock (Adreno only)** - default **OFF**. Requests the Adreno turbo
+  power hint through `adrenotools_set_turbo()`; it can raise power and heat and
+  may be denied without the required kernel access. Leave it off unless a
+  specific driver package benefits.
 
 Preferences and the memory card survive app updates. Clearing app data removes
 both.
@@ -251,14 +290,29 @@ adb exec-out run-as com.gow2.android cat files/gow2.ps2 > gow2.ps2
 
 ## 16 KB page compatibility
 
-The Android app is built for arm64 only. `libmain.so` is linked with
-`-Wl,-z,max-page-size=16384` and `-Wl,-z,common-page-size=16384`, and Gradle
-extracts native libraries at install time (`useLegacyPackaging = true`). This
-keeps the app compatible with 16 KB-page Android 15+ devices without requiring
-the APK's compressed ZIP entries to be 16 KB aligned.
+The Android app is built for arm64 only. `libmain.so` and the libadrenotools
+hook libraries (`libhook_impl.so`, `libmain_hook.so`, `libfile_redirect_hook.so`,
+`libgsl_alloc_hook.so`) are linked with `-Wl,-z,max-page-size=16384` and
+`-Wl,-z,common-page-size=16384`, and Gradle extracts native libraries at
+install time (`useLegacyPackaging = true`). This keeps the app compatible with
+16 KB-page Android 15+ devices without requiring the APK's compressed ZIP
+entries to be 16 KB aligned.
 
 ## Performance notes
 
+- **v2.0 Adreno Edition:** Android builds use ThinLTO, `--gc-sections` and
+  identical-code folding to shrink `libmain.so` and improve instruction-cache
+  behaviour.
+- **CPU affinity:** on Android the EE/render threads are pinned to the fastest
+  available CPU cluster and the VU thread is allowed on all cores. This is a
+  no-op on desktop and does not assume a specific GPU vendor.
+- **Dynamic resolution:** enabled by default on Android. It changes only the
+  swapchain render target (0.6x–1.0x) based on GPU/present frame time; the
+  internal 512x448 GS framebuffer is untouched, so UI and game geometry remain
+  correct. Toggle it in Settings (`PS2_DRS`).
+- **Optional Adreno driver:** the launcher can import a rootless AdrenoTools
+  driver. It is never loaded on Mali/other vendors and falls back to the system
+  driver on failure. Turbo clock is a separate opt-in toggle, default OFF.
 - The game runs its original 60 Hz vblank cadence; frame pacing follows the
   audio device when it has queued samples, with a 60/50 Hz timer fallback.
 - The internal GS resolution is 512x448. `PS2_SCALE=2` raises it and costs
@@ -272,35 +326,31 @@ the APK's compressed ZIP entries to be 16 KB aligned.
 - In this build environment the software-GS headless runner rendered through
   frame 3,500 with the AOT VU1 programs in use, and a 420-frame run produced
   7 seconds of non-silent stereo SPU2 output.
-- No benchmark result is claimed for Mali-G68/G77. The target is a stable
-  30 fps at 1x; if the device cannot reach 60 Hz, the intended configuration is
-  1x with background apps closed. Performance remains unverified without a
-  physical device.
+- No benchmark result is claimed for Mali-G68/G77 or Adreno 6xx. The target is a
+  stable 30 fps at 1x; performance remains unverified without a physical device.
 - The desktop runner accepts `--audio-out file.pcm` to write raw stereo
   signed-16-bit PCM for diagnostics. It is not used by the Android app.
 
 ## Known limitations
 
-1. **Audio banks.** The game's Sony `989NOMID` sound driver asks for
-   `host1:sound/general.bnk`, `general2.bnk`, `SHELL.bnk`, `RHOD10.bnk`,
-   `RHSOLD00.bnk`, `COLOS00.bnk`, and level banks. Those names are not plain
-   ISO9660/TOC files on the retail disc; the equivalent sample data is embedded
-   in the WAD `SNDX_*` groups. The current `host1:` service exposes WAD/VAG TOC
-   entries but does not synthesize these BNK files. The SPU2 path still runs and
-   was verified to produce non-silent stereo output during the intro (audio from
-   WAD sample groups), but bank-driven music, voice, and some effects can be
-   missing. This is the main compatibility item left.
-2. **Performance.** The first device run (mid-range phone, 8 GB RAM) rendered
-   the game but at an unplayable frame rate on v1.0. v1.1 tunes the Android
-   present path (FIFO vsync cadence, sub-millisecond pacing, a ~1.4 M-pixel
-   Android swapchain cap with compositor upscaling, and a runtime deinterlace
-   switch to cut the final blend pass) and logs `fps / CPU / GPU / RAM /
-   audio / VU-interpreter` stats to logcat once per second (`adb logcat -d -s
-   GoW2Stats`). Numbers from real hardware are still needed to go further; if
-   `Vuint` in that line is high, more VU1 programs are missing from the AOT
+1. **Audio banks.** The retail disc has no plain `.bnk` files in
+   `GODOFWAR.TOC`. The 989SND bank images are named `SBP_*` resources in the WAD
+   data heap (for example `R_PERMA.WAD` contains `SBP_general` with 295 sounds
+   and `SBP_general2` with 21). v2.0 scans loaded WADs, validates the `SBlk`
+   bank header, and serves a matching `host1:sound/*.bnk` from the resource
+   bytes. Normal SMPD bank loads also use these `SBP_*` resources directly.
+   The parser and service are implemented, but the exact runtime request names
+   and menu/gameplay bank playback still need a hardware/logcat capture.
+2. **Performance.** v2.0 adds ThinLTO, dead-section folding, CPU affinity,
+   swapchain dynamic resolution, and optional Adreno driver management. The
+   first device run (mid-range phone, 8 GB RAM) was unplayable on v1.0; the
+   v1.1/v2.0 numbers from real hardware are still needed. Check `adb logcat -d
+   -s GoW2Stats`; if `Vuint` is high, more VU1 programs are missing from the AOT
    capture and the interpreter is the bottleneck.
-3. **Dynamic resolution.** The app exposes fixed 1x/2x scaling (2x quadruples
-   the GPU cost - stay on 1x). It does not change scale automatically.
+3. **Dynamic resolution scope.** v2.0 lowers only the Android swapchain target.
+   It does not change the internal PS2 GS render scale (the 1x/2x setting is
+   separate). This is intentional: swapchain-only DRS keeps the game's
+   framebuffer geometry and UI stable while cutting fill-rate cost.
 4. **Region/version.** Only the USA DVD9 `SCUS_974.81` image was tested. PAL and
    other revisions are not supported by this kit.
 5. **Release signing.** `build-android.ps1` produces a debug-signed APK. For
@@ -316,14 +366,25 @@ what was **not** verified, so nothing here is overstated.
 ## Audio work (for contributors)
 
 The useful starting point is the WAD format. A GoW2 WAD has a metadata heap,
-a `PopHeap` marker, and a data heap. `SNDX_*` groups in the metadata heap carry
-a small header; their sample data lives in the data heap (for example the
-`SNDX_default` group in `R_SHELLA.WAD` points at raw sample bytes). The 989SND
-bank loader expects a BNK container, so serving `sound/*.bnk` requires either
-converting the SNDX/group data into the bank format or intercepting the loader
-at a higher level. The current `runtime/src/iop/io.cpp` already knows how to
-resolve `host1:` WAD/VAG entries through `GODOFWAR.TOC` and is the place to add
-that mapping.
+a `PopHeap` marker, and a data heap. The retail disc has **no `.bnk` files in
+`GODOFWAR.TOC`**; the 989SND bank image is a named `SBP_*` resource in the data
+heap. Verified examples:
+
+| WAD | Resource | Sounds | Pseudo name |
+| --- | --- | ---: | --- |
+| `R_PERMA.WAD` | `SBP_general` | 295 | `GEN1` |
+| `R_PERMA.WAD` | `SBP_general2` | 21 | `GEN2` |
+| `R_SHELLA.WAD` | `SBP_SHELL` | 8 | `TL01` |
+| `R_RHSOLD00.WAD` | `SBP_RHSOLD00` | 13 | `RH0` |
+
+Resource layout: `u32 type=1`, `u32 size`, `char name[24]` (`SBP_...`), then
+the SBP bank: `u32 magic=0x15`, `u32 soundCount`, `soundCount * 28` sound
+entries, a 24-byte bank-info block, and the `SBlk` header/ADPCM data at the
+offsets in that block. `runtime/src/iop/io.cpp` scans loaded WADs, validates
+the `SBlk` header, matches the request against the resource suffix, pseudo name
+or `R_<name>` WAD name, and serves the bytes as the virtual `.bnk` file.
+`R_PERMA.WAD` is also tried directly for `general`/`GEN1`/`GEN2` because the
+front-end bank may load before that WAD has been opened.
 
 ## Troubleshooting
 
@@ -344,6 +405,7 @@ that mapping.
 | Recompilation engine, runtime, GS/IOP/SPU2 HLE | [`snuri00/ps2-web-recomp`](https://github.com/snuri00/ps2-web-recomp) (Samir Nuri), pinned at `6526f48` | MIT |
 | Window, audio device, gamepads, lifecycle | [SDL3](https://github.com/libsdl-org/SDL) 3.4.18 | zlib |
 | Vulkan/WebGPU renderer backend | [wgpu-native](https://github.com/gfx-rs/wgpu-native) 29.0.1.1, built on [`wgpu`](https://github.com/gfx-rs/wgpu) / `naga` | MIT OR Apache-2.0 |
+| Optional Adreno driver loading | [libadrenotools](https://github.com/bylaws/libadrenotools) + linkernsbypass, pinned at `8fae8ce` | BSD-2-Clause |
 | Android Gradle wrapper | Gradle project | Apache-2.0 |
 | Kit scripts, Android glue, docs (`engine.patch` changes) | This repository | MIT |
 

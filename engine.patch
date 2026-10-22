@@ -1,17 +1,30 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 20f54f1..ac3dc59 100644
+index 20f54f1..b027597 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -11,7 +11,7 @@ if(EMSCRIPTEN)
+@@ -11,7 +11,20 @@ if(EMSCRIPTEN)
      add_link_options(-msimd128 -mtail-call -fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0 -pthread)
  endif()
  
 -if(NOT EMSCRIPTEN)
++if(ANDROID)
++    # v2.0 performance baseline. ThinLTO lets the 128 generated EE translation
++    # units inline into the runtime helpers; the section flags keep that growth
++    # out of the final DSO. Turn PS2_ANDROID_LTO=OFF for fast iteration.
++    option(PS2_ANDROID_LTO "ThinLTO for the Android runtime and generated game code" ON)
++    add_compile_options(-ffunction-sections -fdata-sections)
++    add_link_options(-Wl,--gc-sections -Wl,--icf=all)
++    if(PS2_ANDROID_LTO)
++        add_compile_options(-flto=thin)
++        add_link_options(-flto=thin -Wl,--lto-O2)
++    endif()
++endif()
++
 +if(NOT EMSCRIPTEN AND NOT ANDROID)
      add_executable(eerecomp
          recomp/main.cpp
          recomp/r5900.cpp
-@@ -59,15 +59,20 @@ add_library(ps2runtime STATIC
+@@ -59,15 +72,20 @@ add_library(ps2runtime STATIC
  target_include_directories(ps2runtime PUBLIC runtime/include)
  target_compile_options(ps2runtime PRIVATE -Wall -Wextra)
  
@@ -35,7 +48,7 @@ index 20f54f1..ac3dc59 100644
          DEPENDS runtime/src/gs/gpu/blit.wgsl cmake/embed.cmake)
      target_sources(ps2runtime PRIVATE runtime/src/gs/gpu/gpu.cpp "${PS2_GS_WGSL}" "${PS2_BLIT_WGSL}")
      target_compile_definitions(ps2runtime PUBLIC PS2_GPU)
-@@ -76,7 +81,11 @@ if(EMSCRIPTEN OR EXISTS "${PS2_WGPU_DIR}/lib/libwgpu_native.a")
+@@ -76,7 +94,11 @@ if(EMSCRIPTEN OR EXISTS "${PS2_WGPU_DIR}/lib/libwgpu_native.a")
          target_link_options(ps2runtime PUBLIC --use-port=emdawnwebgpu)
      else()
          target_include_directories(ps2runtime PRIVATE "${PS2_WGPU_DIR}/include")
@@ -48,7 +61,7 @@ index 20f54f1..ac3dc59 100644
          if(APPLE)
              target_link_libraries(ps2runtime PUBLIC "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework CoreFoundation" "-framework IOKit" "-framework IOSurface" objc)
          endif()
-@@ -105,21 +114,29 @@ if(PS2_GENERATED)
+@@ -105,21 +127,29 @@ if(PS2_GENERATED)
          target_link_options(ps2web PRIVATE --profiling-funcs -sJSPI -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=268435456 -sPTHREAD_POOL_SIZE=2 -sALLOW_TABLE_GROWTH=1 -lidbfs.js -sSTACK_SIZE=16777216 -sENVIRONMENT=web
              -sEXPORTED_FUNCTIONS=_main,_ps2web_pad,_ps2web_pad_connected,_ps2web_resize,_ps2web_gpu_ms,_ps2web_frames,_ps2web_primitives,_ps2web_audio_ring,_ps2web_audio_queued_ms,_ps2web_idle_ms,_ps2web_vu_interpreted
              -sEXPORTED_RUNTIME_METHODS=callMain,addRunDependency,removeRunDependency,HEAPU8,ENV
@@ -110,22 +123,150 @@ index 0000000..59d60a7
 +                    static_cast<std::uint8_t>(rx),
 +                    static_cast<std::uint8_t>(ry));
 +}
+diff --git a/host/android_vulkan_loader.cpp b/host/android_vulkan_loader.cpp
+new file mode 100644
+index 0000000..7733713
+--- /dev/null
++++ b/host/android_vulkan_loader.cpp
+@@ -0,0 +1,121 @@
++// Android Vulkan loader bridge for the Adreno driver manager.
++//
++// wgpu-native loads libvulkan.so with dlopen() from inside libmain.so. That
++// means a driver prepared through libadrenotools would normally be invisible
++// to it: the system linker would still hand wgpu the stock driver. This file
++// closes that gap by interposing dlopen/dlclose for the Vulkan sonames and
++// returning the libadrenotools namespace handle instead. Non-Vulkan dlopen
++// calls go straight to android_dlopen_ext().
++//
++// Everything is opt-in: without PS2_VK_DRIVER the interposer is a no-op and
++// the app behaves exactly like a stock-driver build.
++
++#if defined(__ANDROID__)
++
++#include <android/log.h>
++#include <android/dlext.h>
++#include <dlfcn.h>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <unistd.h>
++
++#ifdef PS2_ADRENOTOOLS
++#include <adrenotools/driver.h>
++#endif
++
++namespace {
++
++constexpr const char *kTag = "GoW2Stats";
++
++void *g_vulkan_handle = nullptr;
++bool g_turbo = false;
++
++using AndroidDlopenExt = void *(*)(const char *, int, const android_dlextinfo *);
++using Dlclose = int (*)(void *);
++
++AndroidDlopenExt real_dlopen_ext() {
++    static AndroidDlopenExt fn = reinterpret_cast<AndroidDlopenExt>(dlsym(RTLD_DEFAULT, "android_dlopen_ext"));
++    return fn;
++}
++
++Dlclose real_dlclose() {
++    static Dlclose fn = reinterpret_cast<Dlclose>(dlsym(RTLD_NEXT, "dlclose"));
++    if (fn == reinterpret_cast<Dlclose>(&dlclose)) return nullptr;
++    return fn;
++}
++
++bool is_vulkan_name(const char *name) {
++    return name && (std::strcmp(name, "libvulkan.so") == 0 || std::strcmp(name, "libvulkan.so.1") == 0);
++}
++
++std::string env_or_empty(const char *key) {
++    const char *value = std::getenv(key);
++    return value ? std::string(value) : std::string();
++}
++
++} // namespace
++
++extern "C" void ps2_android_vulkan_prepare() {
++#ifdef PS2_ADRENOTOOLS
++    if (!g_turbo) {
++        const char *turbo = std::getenv("PS2_TURBO");
++        if (turbo && *turbo && std::strcmp(turbo, "0") != 0) {
++            adrenotools_set_turbo(true);
++            g_turbo = true;
++            __android_log_print(ANDROID_LOG_INFO, kTag, "[driver] turbo clock requested");
++        }
++    }
++
++    if (g_vulkan_handle) return;
++    const std::string driverPath = env_or_empty("PS2_VK_DRIVER");
++    const std::string hookDir = env_or_empty("PS2_VK_HOOK_DIR");
++    const std::string tmpDir = env_or_empty("PS2_VK_TMP");
++    if (driverPath.empty() || hookDir.empty()) return;
++
++    const auto slash = driverPath.find_last_of('/');
++    const std::string driverDir = slash == std::string::npos ? std::string("./") : driverPath.substr(0, slash + 1);
++    const std::string driverName = slash == std::string::npos ? driverPath : driverPath.substr(slash + 1);
++    std::string tmp = tmpDir;
++    if (!tmp.empty() && tmp.back() != '/') tmp.push_back('/');
++
++    void *handle = adrenotools_open_libvulkan(
++        RTLD_NOW | RTLD_LOCAL, ADRENOTOOLS_DRIVER_CUSTOM,
++        tmp.empty() ? nullptr : tmp.c_str(), hookDir.c_str(),
++        driverDir.c_str(), driverName.c_str(), nullptr, nullptr);
++    if (!handle) {
++        __android_log_print(ANDROID_LOG_ERROR, kTag, "[driver] could not load %s (falling back to the system driver)", driverPath.c_str());
++        return;
++    }
++    g_vulkan_handle = handle;
++    __android_log_print(ANDROID_LOG_INFO, kTag, "[driver] custom Vulkan driver active: %s", driverPath.c_str());
++#else
++    (void)g_turbo;
++#endif
++}
++
++// Keep malformed drivers from taking the game down: if the custom driver does
++// not expose the core entry points, wgpu's instance creation fails gracefully
++// and the next launch can fall back to the system driver from Settings.
++extern "C" __attribute__((visibility("default"))) void *dlopen(const char *name, int flags) {
++    if (is_vulkan_name(name)) {
++        if (g_vulkan_handle) {
++            __android_log_print(ANDROID_LOG_INFO, kTag, "[driver] wgpu dlopen(%s) -> custom driver", name);
++            return g_vulkan_handle;
++        }
++        __android_log_print(ANDROID_LOG_INFO, kTag, "[driver] wgpu dlopen(%s) -> system driver", name);
++    }
++    AndroidDlopenExt fn = real_dlopen_ext();
++    return fn ? fn(name, flags, nullptr) : nullptr;
++}
++
++extern "C" __attribute__((visibility("default"))) int dlclose(void *handle) {
++    if (handle && handle == g_vulkan_handle) {
++        __android_log_print(ANDROID_LOG_INFO, kTag, "[driver] keeping the custom Vulkan driver loaded");
++        return 0;
++    }
++    Dlclose fn = real_dlclose();
++    return fn ? fn(handle) : 0;
++}
++
++#endif
 diff --git a/host/main.cpp b/host/main.cpp
-index 9e5e1e4..2ac837d 100644
+index 9e5e1e4..cf6a05a 100644
 --- a/host/main.cpp
 +++ b/host/main.cpp
-@@ -1,5 +1,10 @@
+@@ -1,5 +1,11 @@
 +#include "ps2/disc.hpp"
  #include "ps2/system.hpp"
  
 +#ifdef __ANDROID__
 +#include <SDL3/SDL_main.h>
++extern "C" void ps2_android_vulkan_prepare();
 +#endif
 +
  #ifdef PS2_WINDOW
  #include "window.hpp"
  #endif
-@@ -7,6 +12,7 @@
+@@ -7,6 +13,7 @@
  #include "profile.hpp"
  #endif
  
@@ -133,7 +274,7 @@ index 9e5e1e4..2ac837d 100644
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
-@@ -18,13 +24,59 @@ void register_generated_vu();
+@@ -18,13 +25,59 @@ void register_generated_vu();
  
  namespace {
  
@@ -194,7 +335,15 @@ index 9e5e1e4..2ac837d 100644
      return 2;
  }
  
-@@ -35,6 +87,10 @@ int main(int argc, char **argv) {
+@@ -32,9 +85,18 @@ int usage() {
+ 
+ int main(int argc, char **argv) {
+     if (argc < 2) return usage();
++#ifdef __ANDROID__
++    // Must run before wgpu creates its Vulkan instance: opens the imported
++    // Adreno driver through libadrenotools and applies the optional turbo clock.
++    ps2_android_vulkan_prepare();
++#endif
      std::vector<std::string> args{argv[1]};
      [[maybe_unused]] bool window = false, fullscreen = false;
      std::string load_path;
@@ -205,7 +354,7 @@ index 9e5e1e4..2ac837d 100644
      for (int i = 2; i < argc; ++i) {
          const std::string a = argv[i];
          if (a == "--arg" && i + 1 < argc) args.push_back(argv[++i]);
-@@ -52,6 +108,9 @@ int main(int argc, char **argv) {
+@@ -52,6 +114,9 @@ int main(int argc, char **argv) {
          else if (a == "--trace-io") ps2::g_options.trace_io = true;
          else if (a == "--trace-threads") ps2::g_options.trace_threads = true;
          else if (a == "--disc" && i + 1 < argc) ps2::g_options.disc_path = argv[++i];
@@ -215,7 +364,7 @@ index 9e5e1e4..2ac837d 100644
          else if (a == "--memcard" && i + 1 < argc) ps2::g_options.memcard_path = argv[++i];
          else if (a == "--trace-iop") ps2::g_options.trace_iop_modules = true;
          else if (a == "--trace-iop-hle") ps2::g_options.trace_iop_hle = true;
-@@ -79,20 +138,58 @@ int main(int argc, char **argv) {
+@@ -79,20 +144,58 @@ int main(int argc, char **argv) {
              ps2::g_options.save_state_path = spec.substr(colon + 1);
          }
          else if (a == "--load-state" && i + 1 < argc) load_path = argv[++i];
@@ -276,7 +425,7 @@ index 9e5e1e4..2ac837d 100644
          ps2::boot(entry, args);
          if (!load_path.empty() && !ps2::load_state(load_path)) return 1;
  #ifdef PS2_PROFILE
-@@ -101,9 +198,9 @@ int main(int argc, char **argv) {
+@@ -101,9 +204,9 @@ int main(int argc, char **argv) {
          if (profile) start_profile(profile_from ? std::strtoull(profile_from, nullptr, 10) : 0);
          const int result = ps2::run();
          if (profile) write_profile(profile);
@@ -289,7 +438,7 @@ index 9e5e1e4..2ac837d 100644
      };
  #ifdef PS2_WINDOW
 diff --git a/host/window.cpp b/host/window.cpp
-index 8289130..fa655ce 100644
+index 8289130..b5a8fea 100644
 --- a/host/window.cpp
 +++ b/host/window.cpp
 @@ -2,16 +2,19 @@
@@ -592,13 +741,13 @@ index 8289130..fa655ce 100644
 +        if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
 +            g_paused.store(false);
 +            g_last = 0;
-+        }
+         }
+-        if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED && g_gpu_present) {
 +        if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
 +            const bool full = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) != 0;
 +            SDL_SetWindowFullscreen(g_window, !full);
 +            if (full) SDL_ShowCursor(); else SDL_HideCursor();
-         }
--        if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED && g_gpu_present) {
++        }
 +        if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && g_gpu_present) {
              int w = 0, h = 0;
              SDL_GetWindowSizeInPixels(g_window, &w, &h);
@@ -690,35 +839,92 @@ index 8289130..fa655ce 100644
          g_last += period;
      } else {
          g_last = now;
-@@ -271,27 +384,37 @@ double resident_mb() {
+@@ -271,27 +384,96 @@ double resident_mb() {
  }
  
  void show_speed() {
 -    static std::uint64_t start = 0, frames = 0;
-+    static std::uint64_t start = 0, frames = 0, vu_calls = 0;
-     static double cpu_start = 0.0, gpu_start = 0.0;
+-    static double cpu_start = 0.0, gpu_start = 0.0;
++    static std::uint64_t start = 0, frames = 0, vu_calls = 0, dispatch_start = 0, upload_start = 0;
++    static double cpu_start = 0.0, gpu_start = 0.0, gs_start = 0.0, vu_busy_start = 0.0, present_start = 0.0;
++#if defined(__ANDROID__)
++    static const bool drs_on = [] {
++        const char *env = std::getenv("PS2_DRS");
++        return !env || std::atoi(env) != 0;
++    }();
++#else
++    static const bool drs_on = [] {
++        const char *env = std::getenv("PS2_DRS");
++        return env && std::atoi(env) != 0;
++    }();
++#endif
++    static double drs_scale = 1.0;
++    static int drs_good = 0;
++    static bool drs_ready = false;
      const std::uint64_t now = SDL_GetPerformanceCounter();
++    ++frames;
      if (!start) {
          start = now;
          cpu_start = process_cpu_seconds();
          gpu_start = ps2::gpu_busy_ms();
++        gs_start = ps2::render_thread_busy_ms();
++        vu_busy_start = ps2::vu_thread_busy_ms();
++        present_start = ps2::present_ms();
++        upload_start = ps2::gpu_upload_bytes();
++        dispatch_start = ps2::gpu_dispatches();
 +        vu_calls = ps2::vu1_interpreted_calls();
++        if (!drs_ready) {
++            drs_ready = true;
++            if (const char *env = std::getenv("PS2_DRS_SCALE"))
++                drs_scale = std::clamp(std::atof(env), 0.6, 1.0);
++            ps2::set_present_scale(static_cast<float>(drs_scale));
++        }
++        return;
      }
-     ++frames;
+-    ++frames;
      const double seconds = static_cast<double>(now - start) / static_cast<double>(SDL_GetPerformanceFrequency());
      if (seconds < 1.0) return;
      const double cpu = process_cpu_seconds(), gpu = ps2::gpu_busy_ms();
-+    const std::uint64_t vu_now = ps2::vu1_interpreted_calls();
-     char title[192];
+-    char title[192];
 -    const double queued = g_audio ? SDL_GetQueuedAudioSize(g_audio) / static_cast<double>(kAudioBytesPerMs) : 0.0;
 -    std::snprintf(title, sizeof title, "ps2-web-recomp  %.1f fps  CPU %.0f%%  GPU %.0f%%  RAM %.0f MB  audio %.0f ms", static_cast<double>(frames) / seconds,
 -                  (cpu - cpu_start) / seconds * 100.0, (gpu - gpu_start) / (seconds * 10.0), resident_mb(), queued);
++    const double gs = ps2::render_thread_busy_ms(), vu_busy = ps2::vu_thread_busy_ms(), present = ps2::present_ms();
++    const std::uint64_t vu_now = ps2::vu1_interpreted_calls();
++    const std::uint64_t upload_now = ps2::gpu_upload_bytes(), dispatch_now = ps2::gpu_dispatches();
++    if (drs_on && g_gpu_present && frames >= 30) {
++        const double gpu_frame_ms = (gpu - gpu_start) / static_cast<double>(frames);
++        const double present_frame_ms = (present - present_start) / static_cast<double>(frames);
++        const bool overloaded = gpu_frame_ms > 14.0 || present_frame_ms > 25.0;
++        const bool headroom = gpu_frame_ms < 9.0 && present_frame_ms < 20.0;
++        if (overloaded && drs_scale > 0.6001) {
++            drs_scale = std::max(0.6, drs_scale - 0.1);
++            ps2::set_present_scale(static_cast<float>(drs_scale));
++            drs_good = 0;
++        } else if (headroom && drs_scale < 0.9999) {
++            if (++drs_good >= 5) {
++                drs_scale = std::min(1.0, drs_scale + 0.05);
++                ps2::set_present_scale(static_cast<float>(drs_scale));
++                drs_good = 0;
++            }
++        } else {
++            drs_good = 0;
++        }
++    }
++    char title[320];
 +    const double queued = g_audio ? SDL_GetAudioStreamQueued(g_audio) / static_cast<double>(kAudioBytesPerMs) : 0.0;
-+    std::snprintf(title, sizeof title, "ps2-web-recomp  %.1f fps  CPU %.0f%%  GPU %.0f%%  RAM %.0f MB  audio %.0f ms  Vuint %llu/s",
++    std::snprintf(title, sizeof title,
++                  "ps2-web-recomp  %.1f fps  CPU %.0f%%  GPU %.0f%% (%.1f ms)  EE/GS %.0f%% (%.1f ms)  VU %.0f%%  present %.1f ms  RAM %.0f MB  audio %.0f ms  |  Vuint %llu/s  up %.1f MB/s  disp %llu/s  |  DRS %.2fx  |  %s",
 +                  static_cast<double>(frames) / seconds, (cpu - cpu_start) / seconds * 100.0,
-+                  (gpu - gpu_start) / (seconds * 10.0), resident_mb(), queued,
-+                  static_cast<unsigned long long>(vu_now - vu_calls));
-+#ifdef __ANDROID__
++                  (gpu - gpu_start) / (seconds * 10.0), (gpu - gpu_start) / static_cast<double>(frames),
++                  (gs - gs_start) / (seconds * 10.0), (gs - gs_start) / static_cast<double>(frames),
++                  (vu_busy - vu_busy_start) / (seconds * 10.0), (present - present_start) / static_cast<double>(frames),
++                  resident_mb(), queued,
++                  static_cast<unsigned long long>(vu_now - vu_calls),
++                  static_cast<double>(upload_now - upload_start) / seconds / 1e6,
++                  static_cast<unsigned long long>(static_cast<double>(dispatch_now - dispatch_start) / seconds),
++                  drs_scale, ps2::gpu_device_name());
++#if defined(__ANDROID__)
 +    // The window title is invisible on a phone; logcat carries the stats.
 +    __android_log_print(ANDROID_LOG_INFO, "GoW2Stats", "%s", title);
 +#else
@@ -728,11 +934,16 @@ index 8289130..fa655ce 100644
      frames = 0;
      cpu_start = cpu;
      gpu_start = gpu;
++    gs_start = gs;
++    vu_busy_start = vu_busy;
++    present_start = present;
++    upload_start = upload_now;
++    dispatch_start = dispatch_now;
 +    vu_calls = vu_now;
  }
  
  void on_vblank() {
-@@ -302,44 +425,71 @@ void on_vblank() {
+@@ -302,47 +484,75 @@ void on_vblank() {
  }
  
  void queue_audio(const std::int16_t *samples, std::size_t frames) {
@@ -820,6 +1031,26 @@ index 8289130..fa655ce 100644
      if (!g_gpu_present && !create_renderer()) return 1;
      const bool threads = !std::getenv("PS2_ONE_THREAD") && !std::getenv("PS2_TIME") && ps2::g_options.frames_dir.empty();
      if (!threads) {
++        ps2::pin_thread(0);
+         ps2::g_options.on_vblank = on_vblank;
+         return emulate();
+     }
+@@ -351,6 +561,7 @@ int run_window(const std::function<int()> &emulate) {
+         pace();
+     };
+     ps2::start_render_thread();
++    ps2::pin_thread(1);
+     if (!std::getenv("PS2_NO_VU_THREAD")) {
+         ps2::start_vu_thread();
+         std::thread(ps2::run_vu_thread).detach();
+@@ -358,6 +569,7 @@ int run_window(const std::function<int()> &emulate) {
+     std::atomic<bool> done{false};
+     int result = 0;
+     std::thread emulation([&] {
++        ps2::pin_thread(0);
+         result = emulate();
+         done.store(true);
+         ps2::wake_render_thread();
 diff --git a/host/window.hpp b/host/window.hpp
 index 3174ae9..3c93f22 100644
 --- a/host/window.hpp
@@ -850,7 +1081,7 @@ index 0f1af64..c5600bb 100644
  bool read(std::uint32_t sector, std::uint32_t count, void *out);
  bool ready(std::uint32_t sector, std::uint32_t count);
 diff --git a/runtime/include/ps2/system.hpp b/runtime/include/ps2/system.hpp
-index d794aee..49ad7be 100644
+index d794aee..7fa4e3a 100644
 --- a/runtime/include/ps2/system.hpp
 +++ b/runtime/include/ps2/system.hpp
 @@ -101,7 +101,7 @@ std::uint64_t frame_count();
@@ -862,7 +1093,29 @@ index d794aee..49ad7be 100644
      void *display = nullptr;
      std::uint64_t window = 0;
      void *surface = nullptr;
-@@ -131,6 +131,11 @@ bool parse_axis(const std::string &spec, AxisPress &press);
+@@ -112,12 +112,21 @@ struct WindowTarget {
+ // Lets the WebGPU renderer present straight to a window or canvas instead of handing frames back.
+ bool attach_window(const WindowTarget &target);
+ void resize_window(std::uint32_t width, std::uint32_t height);
++void set_present_scale(float scale);
+ bool present_frame();
+ void init_graphics();
+ void start_render_thread();
+ void start_vu_thread();
+ void run_vu_thread();
+ double vu_thread_idle_ms();
++double vu_thread_busy_ms();
++double render_thread_busy_ms();
++double present_ms();
++std::uint64_t gpu_upload_bytes();
++std::uint64_t gpu_dispatches();
++const char *gpu_device_name();
++// 0 = EE, 1 = render/present, 2 = VU. No-op off Android.
++void pin_thread(int role);
+ std::uint64_t vu1_interpreted_calls();
+ void post_present();
+ enum class Rendered { idle, presented, busy };
+@@ -131,6 +140,11 @@ bool parse_axis(const std::string &spec, AxisPress &press);
  bool load_patches(const std::string &path);
  double gpu_busy_ms();
  void browser_yield();
@@ -923,10 +1176,18 @@ index 4491f35..1f58bfb 100644
      g_reader = std::move(reader);
      g_probe = std::move(probe);
 diff --git a/runtime/src/gs/gpu/gpu.cpp b/runtime/src/gs/gpu/gpu.cpp
-index dc1f3b2..035f684 100644
+index dc1f3b2..bfa5f5c 100644
 --- a/runtime/src/gs/gpu/gpu.cpp
 +++ b/runtime/src/gs/gpu/gpu.cpp
-@@ -16,6 +16,9 @@
+@@ -8,6 +8,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <atomic>
+ #include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -16,6 +17,9 @@
  #include <memory>
  #include <string>
  #include <unordered_map>
@@ -936,7 +1197,48 @@ index dc1f3b2..035f684 100644
  
  extern const char kGsShader[];
  extern const char kBlitShader[];
-@@ -179,6 +182,20 @@ std::vector<std::uint32_t> g_touched;
+@@ -24,6 +28,10 @@ namespace ps2::gs {
+ void swizzle_tables(std::vector<std::uint32_t> &out);
+ }
+ 
++#if defined(__ANDROID__)
++extern "C" void ps2_android_vulkan_prepare();
++#endif
++
+ namespace ps2::gs::gpu {
+ 
+ namespace {
+@@ -41,6 +49,8 @@ constexpr std::uint32_t kDecodePrims = 64;
+ 
+ Mode g_mode = Mode::off;
+ std::uint64_t g_dispatches[kPipelines] = {}, g_submits = 0;
++std::atomic<std::uint64_t> g_upload_bytes{0};
++std::string g_adapter_name = "wgpu";
+ 
+ WGPUInstance g_instance = nullptr;
+ WGPUAdapter g_adapter = nullptr;
+@@ -48,6 +58,11 @@ WGPUSurface g_surface = nullptr;
+ WGPUTextureFormat g_surface_format = WGPUTextureFormat_Undefined;
+ WGPUPresentMode g_present_mode = WGPUPresentMode_Fifo;
+ std::uint32_t g_surface_width = 0, g_surface_height = 0;
++// The swapchain is intentionally rendered below panel resolution on phones.
++// Dynamic resolution keeps the panel-sized blit cheap when a driver starts
++// missing vblank; the PS2 framebuffer itself keeps its native layout.
++std::uint32_t g_window_width = 0, g_window_height = 0;
++float g_present_scale = 1.0f;
+ WGPURenderPipeline g_blit = nullptr;
+ WGPUBindGroup g_blit_group = nullptr;
+ WGPUBuffer g_blit_params = nullptr;
+@@ -64,6 +79,8 @@ bool g_query_pending = false, g_query_ready = false;
+ std::uint64_t g_measured_ns = 0, g_measured = 0, g_total_passes = 0;
+ WGPUDevice g_device = nullptr;
+ WGPUQueue g_queue = nullptr;
++
++void upload(WGPUBuffer buffer, std::uint64_t offset, const void *data, std::size_t size);
+ WGPUBuffer g_vram = nullptr, g_tables = nullptr, g_params = nullptr, g_data = nullptr, g_clut = nullptr, g_scratch = nullptr, g_readback = nullptr, g_decoded = nullptr;
+ std::uint32_t g_decoded_used = 0;
+ bool g_rendered[512] = {};
+@@ -179,6 +196,24 @@ std::vector<std::uint32_t> g_touched;
  
  WGPUStringView view(const char *s) { return WGPUStringView{s, WGPU_STRLEN}; }
  
@@ -947,9 +1249,13 @@ index dc1f3b2..035f684 100644
 +// so keep the surface close to 1080p and let scaling happen after present.
 +void capped_surface_size(std::uint32_t &w, std::uint32_t &h) {
 +    constexpr std::uint64_t kMaxArea = 1400000ull;
-+    const std::uint64_t area = static_cast<std::uint64_t>(w) * h;
-+    if (!w || !h || area <= kMaxArea) return;
-+    const double factor = std::sqrt(static_cast<double>(kMaxArea) / static_cast<double>(area));
++    if (!w || !h) return;
++    const double area = static_cast<double>(w) * static_cast<double>(h);
++    const double max_area = static_cast<double>(kMaxArea) *
++                            static_cast<double>(g_present_scale) * static_cast<double>(g_present_scale);
++    // Always honour the dynamic scale, even on panels below the area cap.
++    const double factor = std::min(1.0, std::sqrt(max_area / area));
++    if (factor >= 0.999) return;
 +    w = std::max(2u, static_cast<std::uint32_t>(w * factor));
 +    h = std::max(2u, static_cast<std::uint32_t>(h * factor));
 +}
@@ -957,19 +1263,113 @@ index dc1f3b2..035f684 100644
  std::uint32_t bits_per_pixel(std::uint32_t psm) {
      switch (psm) {
      case PSMCT24: case PSMZ24: return 24;
-@@ -1130,7 +1147,10 @@ bool init(Mode m) {
+@@ -313,7 +348,7 @@ bool cache_insert(std::uint64_t key, const std::uint8_t *bytes, std::size_t n, s
+     to[words - 1] = 0;
+     to[words - 2] = 0;
+     std::memcpy(to, bytes, n);
+-    wgpuQueueWriteBuffer(g_queue, g_cache, static_cast<std::uint64_t>(offset) * 4, to, static_cast<std::uint64_t>(words) * 4);
++    upload(g_cache, static_cast<std::uint64_t>(offset) * 4, to, static_cast<std::uint64_t>(words) * 4);
+     g_cache_ring.push_back({key, offset, words, n, g_serial});
+     g_cache_index.emplace(key, &g_cache_ring.back());
+     g_cache_head += words;
+@@ -739,6 +774,13 @@ WGPUBuffer make_buffer(std::uint64_t size, WGPUBufferUsage usage) {
+     return wgpuDeviceCreateBuffer(g_device, &d);
+ }
+ 
++// Single choke point for host->GPU uploads so the stats line can report how
++// much traffic the GS path generates per second.
++void upload(WGPUBuffer buffer, std::uint64_t offset, const void *data, std::size_t size) {
++    wgpuQueueWriteBuffer(g_queue, buffer, offset, data, size);
++    g_upload_bytes.fetch_add(size, std::memory_order_relaxed);
++}
++
+ void rebuild_group() {
+     if (g_group) wgpuBindGroupRelease(g_group);
+     WGPUBindGroupEntry e[8] = {};
+@@ -786,8 +828,8 @@ void profile_submit() {
+         g_profile_read = make_buffer(kMax * 16, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+     }
+     ensure_capacity();
+-    wgpuQueueWriteBuffer(g_queue, g_data, 0, g_arena.data(), g_arena.size() * 4);
+-    wgpuQueueWriteBuffer(g_queue, g_params, 0, g_param_records.data(), g_param_records.size() * kParamStride);
++    upload(g_data, 0, g_arena.data(), g_arena.size() * 4);
++    upload(g_params, 0, g_param_records.data(), g_param_records.size() * kParamStride);
+     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
+     const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(g_commands.size(), kMax));
+     for (std::uint32_t i = 0; i < g_commands.size(); ++i) {
+@@ -851,8 +893,8 @@ void submit(WGPUTextureView present_view = nullptr) {
+         return;
+     }
+     ensure_capacity();
+-    wgpuQueueWriteBuffer(g_queue, g_data, 0, g_arena.data(), g_arena.size() * 4);
+-    wgpuQueueWriteBuffer(g_queue, g_params, 0, g_param_records.data(), g_param_records.size() * kParamStride);
++    upload(g_data, 0, g_arena.data(), g_arena.size() * 4);
++    upload(g_params, 0, g_param_records.data(), g_param_records.size() * kParamStride);
+     if (g_query_ready) {
+         const void *mapped = wgpuBufferGetConstMappedRange(g_query_read, 0, 16);
+         if (mapped) {
+@@ -1098,6 +1140,11 @@ Mode mode() { return g_mode; }
+ 
+ bool init(Mode m) {
+     if (m == Mode::off) return false;
++#if defined(__ANDROID__)
++    // Prepares an optional custom Adreno driver (libadrenotools) before wgpu
++    // asks the linker for libvulkan.so. No-op unless Settings selected one.
++    ps2_android_vulkan_prepare();
++#endif
+ #ifdef __EMSCRIPTEN__
+     g_instance = wgpuCreateInstance(nullptr);
+ #else
+@@ -1130,7 +1177,20 @@ bool init(Mode m) {
      }
      WGPUAdapterInfo info = WGPU_ADAPTER_INFO_INIT;
      if (wgpuAdapterGetInfo(adapter, &info) == WGPUStatus_Success) {
 -        std::fprintf(stderr, "[gpu] %.*s (%.*s)\n", static_cast<int>(info.device.length), info.device.data, static_cast<int>(info.description.length), info.description.data);
-+        std::fprintf(stderr, "[gpu] %.*s (%.*s)\n", static_cast<int>(info.device.length), info.device.length ? info.device.data : "", static_cast<int>(info.description.length), info.description.length ? info.description.data : "");
-+#ifdef __ANDROID__
-+        __android_log_print(ANDROID_LOG_INFO, "GoW2Stats", "[gpu] %.*s (%.*s)", static_cast<int>(info.device.length), info.device.length ? info.device.data : "", static_cast<int>(info.description.length), info.description.length ? info.description.data : "");
++        const auto view_string = [](WGPUStringView v) {
++            return std::string(v.data ? v.data : "", v.length == WGPU_STRLEN ? (v.data ? std::strlen(v.data) : 0) : v.length);
++        };
++        std::string name = view_string(info.device);
++        if (name.empty()) name = view_string(info.description);
++        if (name.empty()) name = "unknown GPU";
++#if defined(__ANDROID__)
++        name += " [vulkan]";
++#endif
++        g_adapter_name = name;
++        std::fprintf(stderr, "[gpu] %s\n", g_adapter_name.c_str());
++#if defined(__ANDROID__)
++        __android_log_print(ANDROID_LOG_INFO, "GoW2Stats", "[gpu] %s", g_adapter_name.c_str());
 +#endif
          wgpuAdapterInfoFreeMembers(info);
      }
      WGPULimits supported = WGPU_LIMITS_INIT;
-@@ -1640,6 +1660,7 @@ bool attach_surface(const SurfaceTarget &target) {
+@@ -1182,7 +1242,7 @@ bool init(Mode m) {
+     std::vector<std::uint32_t> tables;
+     swizzle_tables(tables);
+     g_tables = make_buffer(tables.size() * 4, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst);
+-    wgpuQueueWriteBuffer(g_queue, g_tables, 0, tables.data(), tables.size() * 4);
++    upload(g_tables, 0, tables.data(), tables.size() * 4);
+     g_clut = make_buffer(static_cast<std::uint64_t>(kClutSlots) * kClutEntries * 4, WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst);
+     g_scratch = make_buffer((static_cast<std::uint64_t>(g_copy_words) + 2ull * g_field_words) * 4, WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc);
+     g_cache = make_buffer(static_cast<std::uint64_t>(kCacheWords) * 4, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst);
+@@ -1600,14 +1660,14 @@ void write_state(const std::vector<std::uint32_t> &vram, std::uint32_t scale, co
+     const std::uint32_t from = scale * scale, to = g_scale * g_scale;
+     std::fill(std::begin(g_rendered), std::end(g_rendered), from == to && to > 1);
+     if (from == to && vram.size() == words * to) {
+-        wgpuQueueWriteBuffer(g_queue, g_vram, 0, vram.data(), vram.size() * 4);
++        upload(g_vram, 0, vram.data(), vram.size() * 4);
+     } else {
+         std::vector<std::uint32_t> layers(words * to);
+         for (std::size_t w = 0; w < words; ++w)
+             for (std::uint32_t k = 0; k < to; ++k) layers[w * to + k] = vram[w * from];
+-        wgpuQueueWriteBuffer(g_queue, g_vram, 0, layers.data(), layers.size() * 4);
++        upload(g_vram, 0, layers.data(), layers.size() * 4);
+     }
+-    if (clut.size() >= kClutEntries) wgpuQueueWriteBuffer(g_queue, g_clut, static_cast<std::uint64_t>(g_clut_slot) * kClutEntries * 4, clut.data(), kClutEntries * 4);
++    if (clut.size() >= kClutEntries) upload(g_clut, static_cast<std::uint64_t>(g_clut_slot) * kClutEntries * 4, clut.data(), kClutEntries * 4);
+     wait_idle();
+ }
+ 
+@@ -1640,6 +1700,7 @@ bool attach_surface(const SurfaceTarget &target) {
  #else
      WGPUSurfaceSourceXlibWindow xlib = WGPU_SURFACE_SOURCE_XLIB_WINDOW_INIT;
      WGPUSurfaceSourceWaylandSurface wayland = WGPU_SURFACE_SOURCE_WAYLAND_SURFACE_INIT;
@@ -977,7 +1377,7 @@ index dc1f3b2..035f684 100644
      if (target.kind == SurfaceTarget::X11) {
          xlib.display = target.display;
          xlib.window = target.window;
-@@ -1648,6 +1669,9 @@ bool attach_surface(const SurfaceTarget &target) {
+@@ -1648,6 +1709,9 @@ bool attach_surface(const SurfaceTarget &target) {
          wayland.display = target.display;
          wayland.surface = target.surface;
          sd.nextInChain = &wayland.chain;
@@ -987,7 +1387,7 @@ index dc1f3b2..035f684 100644
      } else {
          return false;
      }
-@@ -1666,13 +1690,27 @@ bool attach_surface(const SurfaceTarget &target) {
+@@ -1666,13 +1730,29 @@ bool attach_surface(const SurfaceTarget &target) {
              g_surface_format = caps.formats[i];
              break;
          }
@@ -1007,6 +1407,8 @@ index dc1f3b2..035f684 100644
              if (caps.presentModes[i] == wanted) g_present_mode = wanted;
 +#endif
      wgpuSurfaceCapabilitiesFreeMembers(caps);
++    g_window_width = target.width;
++    g_window_height = target.height;
      g_surface_width = target.width;
      g_surface_height = target.height;
 +#ifdef __ANDROID__
@@ -1015,11 +1417,13 @@ index dc1f3b2..035f684 100644
      configure_surface();
  
      WGPUShaderSourceWGSL source = WGPU_SHADER_SOURCE_WGSL_INIT;
-@@ -1728,7 +1766,11 @@ bool attach_surface(const SurfaceTarget &target) {
+@@ -1728,27 +1808,41 @@ bool attach_surface(const SurfaceTarget &target) {
  }
  
  void resize_surface(std::uint32_t width, std::uint32_t height) {
 -    if (!g_surface || (width == g_surface_width && height == g_surface_height)) return;
++    g_window_width = width;
++    g_window_height = height;
 +    if (!g_surface) return;
 +#ifdef __ANDROID__
 +    capped_surface_size(width, height);
@@ -1028,7 +1432,20 @@ index dc1f3b2..035f684 100644
      g_surface_width = width;
      g_surface_height = height;
      configure_surface();
-@@ -1740,8 +1782,7 @@ bool present(const DisplaySource &src) {
+ }
+ 
++void set_present_scale(float scale) {
++    scale = std::clamp(scale, 0.5f, 1.0f);
++    if (std::fabs(scale - g_present_scale) < 0.01f) return;
++    g_present_scale = scale;
++#ifdef __ANDROID__
++    if (g_surface && g_window_width && g_window_height) resize_surface(g_window_width, g_window_height);
++#endif
++}
++
+ bool has_surface() { return g_surface != nullptr; }
+ 
+ bool present(const DisplaySource &src) {
      if (!g_surface) return false;
      flush_all();
      const std::uint32_t current = field_base(g_field), previous = field_base(g_field + 1);
@@ -1038,8 +1455,31 @@ index dc1f3b2..035f684 100644
      const std::uint32_t param = push_params({src.fbp, src.fbw, src.psm, src.dbx, src.dby, src.width, src.height, src.halved ? 1u : 0u, current});
      g_commands.push_back({kDisplay, (src.width * g_scale + 7) / 8, (src.height * g_scale + 7) / 8, param});
      const float sw = static_cast<float>(g_surface_width), sh = static_cast<float>(g_surface_height);
+     const float aspect = g_options.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f;
+     const float vw = std::min(sw, sh * aspect), vh = vw / aspect;
+     const std::uint32_t blit[8] = {src.width * g_scale, src.height * g_scale, current, previous, blend ? 1u : 0u, static_cast<std::uint32_t>(vw), static_cast<std::uint32_t>(vh), 0};
+-    wgpuQueueWriteBuffer(g_queue, g_blit_params, 0, blit, sizeof blit);
++    upload(g_blit_params, 0, blit, sizeof blit);
+     ++g_field;
+     g_have_previous = true;
+     g_last_width = src.width;
+@@ -1859,4 +1953,14 @@ bool display(const DisplaySource &src, std::vector<std::uint32_t> &rgba, std::ui
+     return true;
+ }
+ 
++std::uint64_t upload_bytes() { return g_upload_bytes.load(std::memory_order_relaxed); }
++
++std::uint64_t dispatch_count() {
++    std::uint64_t total = 0;
++    for (std::uint64_t n : g_dispatches) total += n;
++    return total;
++}
++
++const char *adapter_description() { return g_adapter_name.c_str(); }
++
+ }
 diff --git a/runtime/src/gs/gpu/gpu.hpp b/runtime/src/gs/gpu/gpu.hpp
-index 2f09e51..328b6f6 100644
+index 2f09e51..c78497e 100644
 --- a/runtime/src/gs/gpu/gpu.hpp
 +++ b/runtime/src/gs/gpu/gpu.hpp
 @@ -15,7 +15,7 @@ struct DisplaySource {
@@ -1051,8 +1491,22 @@ index 2f09e51..328b6f6 100644
      void *display;
      std::uint64_t window;
      void *surface;
+@@ -42,9 +42,13 @@ bool display(const DisplaySource &src, std::vector<std::uint32_t> &rgba, std::ui
+ bool display_async(const DisplaySource &src, std::vector<std::uint32_t> &rgba, std::uint32_t &width, std::uint32_t &height);
+ bool attach_surface(const SurfaceTarget &target);
+ void resize_surface(std::uint32_t width, std::uint32_t height);
++void set_present_scale(float scale);
+ bool has_surface();
+ bool present(const DisplaySource &src);
+ double busy_ms();
++std::uint64_t upload_bytes();
++std::uint64_t dispatch_count();
++const char *adapter_description();
+ void stats();
+ 
+ }
 diff --git a/runtime/src/gs/gs.cpp b/runtime/src/gs/gs.cpp
-index 907e575..5720918 100644
+index 907e575..7484ea1 100644
 --- a/runtime/src/gs/gs.cpp
 +++ b/runtime/src/gs/gs.cpp
 @@ -22,6 +22,15 @@
@@ -1071,7 +1525,22 @@ index 907e575..5720918 100644
  namespace ps2::gs {
  
  State g_state;
-@@ -946,8 +955,7 @@ bool copy_frame(const DisplayRegs &r, std::vector<std::uint32_t> &rgba, std::uin
+@@ -843,6 +852,14 @@ void resize_window(std::uint32_t width, std::uint32_t height) {
+ #endif
+ }
+ 
++void set_present_scale(float scale) {
++#ifdef PS2_GPU
++    gpu::set_present_scale(scale);
++#else
++    (void)scale;
++#endif
++}
++
+ double gpu_busy_ms() {
+ #ifdef PS2_GPU
+     return gpu::busy_ms();
+@@ -946,8 +963,7 @@ bool copy_frame(const DisplayRegs &r, std::vector<std::uint32_t> &rgba, std::uin
          previous = rgba;
          return true;
      }
@@ -1081,6 +1550,18 @@ index 907e575..5720918 100644
      for (std::size_t i = 0; i < rgba.size(); ++i) {
          const std::uint32_t c = rgba[i];
          if (blend) rgba[i] = (c & previous[i]) + (((c ^ previous[i]) & 0xFEFEFEFEu) >> 1);
+diff --git a/runtime/src/gs/gs.hpp b/runtime/src/gs/gs.hpp
+index 76e248d..0bc2ff0 100644
+--- a/runtime/src/gs/gs.hpp
++++ b/runtime/src/gs/gs.hpp
+@@ -80,6 +80,7 @@ bool copy_frame(std::vector<std::uint32_t> &rgba, std::uint32_t &width, std::uin
+ bool copy_frame(const DisplayRegs &regs, std::vector<std::uint32_t> &rgba, std::uint32_t &width, std::uint32_t &height);
+ bool attach_window(int kind, void *display, std::uint64_t window, void *surface, const char *selector, std::uint32_t width, std::uint32_t height);
+ void resize_window(std::uint32_t width, std::uint32_t height);
++void set_present_scale(float scale);
+ bool present();
+ bool present(const DisplayRegs &regs);
+ void start_thread();
 diff --git a/runtime/src/iop/cdvd.cpp b/runtime/src/iop/cdvd.cpp
 index 218cbda..5950b22 100644
 --- a/runtime/src/iop/cdvd.cpp
@@ -1106,21 +1587,23 @@ index 218cbda..5950b22 100644
          std::fprintf(stderr, "[iop] cannot read module %s\n", path.c_str());
      }
 diff --git a/runtime/src/iop/io.cpp b/runtime/src/iop/io.cpp
-index c00c0bf..2d4555b 100644
+index c00c0bf..1a8e8fa 100644
 --- a/runtime/src/iop/io.cpp
 +++ b/runtime/src/iop/io.cpp
-@@ -7,7 +7,10 @@
+@@ -7,7 +7,12 @@
  
  #include <algorithm>
  #include <cstdio>
++#include <cstdlib>
 +#include <cstring>
  #include <map>
++#include <optional>
 +#include <string>
 +#include <vector>
  
  namespace ps2::iop::io {
  
-@@ -25,7 +28,15 @@ struct File {
+@@ -25,7 +30,52 @@ struct File {
      bool in_memory = false;
  };
  
@@ -1133,10 +1616,47 @@ index c00c0bf..2d4555b 100644
 +std::map<std::string, TocFile> g_toc;
 +bool g_toc_loaded = false;
 +bool g_toc_failed = false;
++
++// ---------------------------------------------------------------------------
++// 989SND banks
++//
++// GoW2 does not ship the .bnk files as TOC entries.  Each level/character WAD
++// carries one or more SBP resources in its raw data heap, for example
++//
++//   R_PERMA.WAD   -> SBP_general  (295 sounds) + SBP_general2 (21 sounds)
++//   R_SHELLA.WAD  -> SBP_SHELL    (8 sounds)
++//   R_RHSOLD00.WAD-> SBP_RHSOLD00 (13 sounds)
++//
++// SMPD asks the IOP for host1:sound/<bank>.bnk.  Serve the matching SBP image
++// from the WAD instead of failing the open.  The resource is already in the
++// exact 989SND bank format, so no transcoding is needed.
++struct BankResource {
++    std::string name;   // resource suffix after "SBP_"
++    std::string pseudo; // reversed 4-byte bank name in the SBlk header
++    std::uint64_t offset = 0;
++    std::uint32_t size = 0;
++};
++
++struct WadFile {
++    std::string name;
++    std::uint32_t sector = 0;
++    std::uint32_t size = 0;
++    bool scanned = false;
++    std::vector<BankResource> banks;
++};
++
++struct BankHit {
++    BankResource bank;
++    std::string wad_name;
++    std::uint32_t wad_sector = 0;
++    std::uint32_t wad_size = 0;
++};
++
++std::vector<WadFile> g_wads;
  
  std::string device_of(const std::string &path) {
      const auto colon = path.find(':');
-@@ -35,6 +46,83 @@ std::string device_of(const std::string &path) {
+@@ -35,6 +85,319 @@ std::string device_of(const std::string &path) {
      return d;
  }
  
@@ -1217,31 +1737,305 @@ index c00c0bf..2d4555b 100644
 +    return nullptr;
 +}
 +
++bool trace_files() {
++    static const bool enabled = std::getenv("PS2_TRACE_FILES") != nullptr;
++    return enabled;
++}
++
++bool ends_with_ci(const std::string &text, const char *suffix) {
++    const std::size_t n = std::strlen(suffix);
++    if (text.size() < n) return false;
++    for (std::size_t i = 0; i < n; ++i)
++        if (std::tolower(static_cast<unsigned char>(text[text.size() - n + i])) !=
++            std::tolower(static_cast<unsigned char>(suffix[i])))
++            return false;
++    return true;
++}
++
++std::string basename_upper(const std::string &path) {
++    std::string name = path;
++    const auto colon = name.find(':');
++    if (colon != std::string::npos) name = name.substr(colon + 1);
++    const auto slash = name.find_last_of("/\\");
++    if (slash != std::string::npos) name = name.substr(slash + 1);
++    const auto semicolon = name.find(';');
++    if (semicolon != std::string::npos) name = name.substr(0, semicolon);
++    return upper(name);
++}
++
++bool is_bank_path(const std::string &path) {
++    const std::string low = [&] {
++        std::string s = path;
++        for (char &ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
++        return s;
++    }();
++    // Only the 989SND bank open is virtualised. Other sound/ paths are VAG
++    // streams or directory probes and must go through the normal TOC path.
++    return ends_with_ci(low, ".bnk");
++}
++
++std::string bank_name_from_path(const std::string &path) {
++    std::string name = basename_upper(path);
++    if (ends_with_ci(name, ".BNK")) name.resize(name.size() - 4);
++    return name;
++}
++
++void remember_wad(const std::string &path, std::uint32_t sector, std::uint32_t size) {
++    const std::string name = basename_upper(path);
++    if (!ends_with_ci(name, ".WAD") || !size) return;
++    if (trace_files()) std::fprintf(stderr, "[io] wad %s sector=%u size=%u\n", name.c_str(), sector, size);
++    for (WadFile &w : g_wads) {
++        if (w.sector == sector && w.size == size) {
++            w.name = name;
++            return;
++        }
++    }
++    // Keep the cache bounded; game levels only keep a handful of WADs resident.
++    if (g_wads.size() >= 128) g_wads.erase(g_wads.begin());
++    g_wads.push_back(WadFile{name, sector, size, false, {}});
++}
++
++bool read_disc_range(std::uint32_t sector, std::uint32_t file_size, std::uint64_t offset,
++                     std::uint32_t size, std::vector<std::uint8_t> &out) {
++    if (!size || offset + size > file_size) return false;
++    const std::uint32_t first = static_cast<std::uint32_t>(offset / disc::kSector);
++    const std::uint32_t last = static_cast<std::uint32_t>((offset + size + disc::kSector - 1) / disc::kSector);
++    std::vector<std::uint8_t> buffer(static_cast<std::size_t>(last - first) * disc::kSector);
++    if (!disc::read(sector + first, last - first, buffer.data())) return false;
++    const std::size_t skip = static_cast<std::size_t>(offset - static_cast<std::uint64_t>(first) * disc::kSector);
++    out.assign(buffer.begin() + static_cast<std::ptrdiff_t>(skip),
++               buffer.begin() + static_cast<std::ptrdiff_t>(skip + size));
++    return true;
++}
++
++std::string trim_bank_text(const char *text, std::size_t size) {
++    std::string value(text, text + size);
++    const auto end = value.find('\0');
++    if (end != std::string::npos) value.resize(end);
++    while (!value.empty() && (value.back() == ' ' || value.back() == '\0')) value.pop_back();
++    return value;
++}
++
++void scan_wad(WadFile &wad) {
++    if (wad.scanned) return;
++    wad.scanned = true;
++    std::vector<std::uint8_t> data;
++    if (!read_disc_range(wad.sector, wad.size, 0, wad.size, data)) return;
++
++    const auto *const begin = data.data();
++    const auto *const end = begin + data.size();
++    const auto *p = begin;
++    static constexpr char kSbpTag[] = "SBP_";
++    while (true) {
++        p = std::search(p, end, kSbpTag, kSbpTag + 4);
++        if (p == end) break;
++        if (p - begin < 8) {
++            ++p;
++            continue;
++        }
++        const std::uint32_t type = le32(p - 8);
++        const std::uint32_t size = le32(p - 4);
++        const std::uint64_t available = static_cast<std::uint64_t>(end - p);
++        if ((type & 0xffffu) != 1u || size < 0x38 || 24ull + size > available) {
++            ++p;
++            continue;
++        }
++
++        const std::uint8_t *const sbp = p + 24;
++        if (le32(sbp) != 0x15u) {
++            ++p;
++            continue;
++        }
++        const std::uint32_t count = le32(sbp + 4);
++        const std::uint64_t bank_at = static_cast<std::uint64_t>(sbp - begin) + 8 + count * 28ull;
++        if (count > 4096u || bank_at + 0x38 > data.size() ||
++            bank_at + 0x38 > static_cast<std::uint64_t>(sbp - begin) + size) {
++            ++p;
++            continue;
++        }
++        const std::uint8_t *const bank = begin + bank_at;
++        const std::uint32_t header_start = le32(bank + 8);
++        const std::uint32_t header_size = le32(bank + 0xc);
++        if (header_start + 0x38 > header_size ||
++            static_cast<std::uint64_t>(bank_at) + header_start + 0x38 > data.size()) {
++            ++p;
++            continue;
++        }
++        const std::uint8_t *const header = bank + header_start;
++        if (std::memcmp(header, "SBlk", 4) != 0) {
++            ++p;
++            continue;
++        }
++
++        char backwards[4] = {static_cast<char>(header[0xf]), static_cast<char>(header[0xe]),
++                             static_cast<char>(header[0xd]), static_cast<char>(header[0xc])};
++        std::string pseudo = trim_bank_text(backwards, 4);
++        std::string resource = trim_bank_text(reinterpret_cast<const char *>(p), 24);
++        if (resource.rfind("SBP_", 0) == 0) resource.erase(0, 4);
++        wad.banks.push_back(BankResource{resource, pseudo,
++                                         static_cast<std::uint64_t>(sbp - begin), size});
++        p += 4;
++    }
++    if (kernel::g_trace_hle)
++        std::fprintf(stderr, "[io] scanned %s: %zu SBP bank(s)\n", wad.name.c_str(), wad.banks.size());
++}
++
++bool bank_name_matches(const std::string &request, const BankResource &bank) {
++    const std::string r = upper(bank.name);
++    const std::string p = upper(bank.pseudo);
++    if (r == request || p == request) return true;
++    if (request.rfind("R_", 0) == 0 && request.substr(2) == r) return true;
++    if (r.rfind("R_", 0) == 0 && r.substr(2) == request) return true;
++    // R_SHELLA (WAD/tag name) vs SHELL (SBP_SHELL resource).
++    if (request.rfind("R_", 0) == 0 && request.size() > r.size() &&
++        request.find(r) != std::string::npos)
++        return true;
++    return false;
++}
++
++std::optional<BankHit> search_wad(WadFile &wad, const std::string &request) {
++    scan_wad(wad);
++    for (const BankResource &bank : wad.banks) {
++        if (bank_name_matches(request, bank))
++            return BankHit{bank, wad.name, wad.sector, wad.size};
++    }
++    return std::nullopt;
++}
++
++bool likely_bank_wad(const std::string &wad_name, const std::string &request) {
++    const std::string wad = upper(wad_name);
++    const std::string name = upper(request);
++    if (wad.find(name) != std::string::npos) return true;
++    if (name == "PERM" || name == "R_PERM" || name == "SCREENGO" ||
++        name.rfind("GENERAL", 0) == 0 || name.rfind("GEN", 0) == 0)
++        return wad == "R_PERMA.WAD";
++    return false;
++}
++
++std::optional<BankHit> find_bank(const std::string &path) {
++    const std::string request = bank_name_from_path(path);
++    if (request.empty()) return std::nullopt;
++    if (trace_files()) std::fprintf(stderr, "[io] bank request %s\n", request.c_str());
++
++    // Prefer WADs whose names identify the bank; this avoids loading a large
++    // level WAD just because it happens to be at the back of the cache.
++    for (auto it = g_wads.rbegin(); it != g_wads.rend(); ++it) {
++        if (likely_bank_wad(it->name, request))
++            if (auto hit = search_wad(*it, request)) return hit;
++    }
++
++    // The general/front-end bank is in R_PERMA.WAD, which may not have been
++    // opened yet when the sound system initialises.
++    std::vector<std::string> candidates;
++    const auto add = [&](const std::string &name) {
++        for (const std::string &existing : candidates)
++            if (existing == name) return;
++        candidates.push_back(name);
++    };
++    if (request.rfind("GENERAL", 0) == 0 || request == "GEN1" || request == "GEN2" ||
++        request == "PERM" || request == "R_PERM" || request == "SCREENGO") {
++        add("R_PERMA.WAD");
++    }
++    add("R_" + request + ".WAD");
++    add(request + ".WAD");
++    load_toc();
++    for (const auto &entry : g_toc) {
++        if (!ends_with_ci(entry.first, ".WAD")) continue;
++        if (entry.first.rfind("R_" + request, 0) == 0 || entry.first.rfind(request, 0) == 0)
++            add(entry.first);
++        if (candidates.size() >= 8) break;
++    }
++    for (const std::string &name : candidates) {
++        const TocFile *entry = toc_file("host1:wad/" + name);
++        if (!entry) continue;
++        WadFile *wad = nullptr;
++        for (WadFile &existing : g_wads) {
++            if (existing.sector == entry->sector && existing.size == entry->size) {
++                wad = &existing;
++                break;
++            }
++        }
++        if (!wad) {
++            if (g_wads.size() >= 128) g_wads.erase(g_wads.begin());
++            g_wads.push_back(WadFile{name, entry->sector, entry->size, false, {}});
++            wad = &g_wads.back();
++        }
++        if (auto hit = search_wad(*wad, request)) return hit;
++    }
++
++    // Last resort: scan the remaining loaded WADs. This is rare and keeps the
++    // common front-end path from touching unrelated level data.
++    for (auto it = g_wads.rbegin(); it != g_wads.rend(); ++it) {
++        if (!likely_bank_wad(it->name, request))
++            if (auto hit = search_wad(*it, request)) return hit;
++    }
++    std::fprintf(stderr, "[io] bank %s: no SBP resource in loaded WADs\n", request.c_str());
++    return std::nullopt;
++}
++
  int allocate() {
      for (int fd = 3; fd < 64; ++fd)
          if (!g_files.count(fd)) return fd;
-@@ -63,6 +151,14 @@ int open(const std::string &path, std::uint32_t flags) {
+@@ -44,6 +407,7 @@ int allocate() {
+ }
+ 
+ int open(const std::string &path, std::uint32_t flags) {
++    if (trace_files()) std::fprintf(stderr, "[io] open %s flags=0x%X\n", path.c_str(), flags);
+     const std::string device = device_of(path);
+     File f;
+     if (device == "cdrom") {
+@@ -51,6 +415,7 @@ int open(const std::string &path, std::uint32_t flags) {
+         if (!entry || entry->directory) return kNoEntry;
+         f.sector = entry->sector;
+         f.size = entry->size;
++        remember_wad(path, f.sector, f.size);
+     } else if (device == "rom") {
+         std::string name = path.substr(path.find(':') + 1);
+         if (name == "ROMVER") {
+@@ -63,6 +428,29 @@ int open(const std::string &path, std::uint32_t flags) {
          }
          f.in_memory = true;
          f.size = static_cast<std::uint32_t>(f.memory.size());
 +    } else if (device == "host1" || device == "host") {
-+        const TocFile *entry = toc_file(path);
-+        if (!entry) {
-+            std::fprintf(stderr, "[io] open %s (flags 0x%X): not in GODOFWAR.TOC\n", path.c_str(), flags);
-+            return kNoEntry;
++        if (is_bank_path(path)) {
++            if (auto hit = find_bank(path)) {
++                if (read_disc_range(hit->wad_sector, hit->wad_size, hit->bank.offset,
++                                    hit->bank.size, f.memory)) {
++                    f.in_memory = true;
++                    f.size = static_cast<std::uint32_t>(f.memory.size());
++                    std::fprintf(stderr, "[io] bank %s <- %s/SBP_%s (%u bytes)\n",
++                                 path.c_str(), hit->wad_name.c_str(),
++                                 hit->bank.name.c_str(), f.size);
++                }
++            }
 +        }
-+        f.sector = entry->sector;
-+        f.size = entry->size;
++        if (!f.in_memory) {
++            const TocFile *entry = toc_file(path);
++            if (!entry) {
++                std::fprintf(stderr, "[io] open %s (flags 0x%X): not in GODOFWAR.TOC\n", path.c_str(), flags);
++                return kNoEntry;
++            }
++            f.sector = entry->sector;
++            f.size = entry->size;
++            remember_wad(path, f.sector, f.size);
++        }
      } else {
          std::fprintf(stderr, "[io] open %s (flags 0x%X) on unsupported device\n", path.c_str(), flags);
          return kNoEntry;
-@@ -112,7 +208,15 @@ std::int64_t seek(int fd, std::int64_t offset, int whence) {
+@@ -112,7 +500,22 @@ std::int64_t seek(int fd, std::int64_t offset, int whence) {
  }
  
  bool stat(const std::string &path, std::uint32_t &mode, std::uint32_t &size) {
 -    if (device_of(path) != "cdrom") return false;
 +    const std::string device = device_of(path);
 +    if (device == "host1" || device == "host") {
++        if (is_bank_path(path)) {
++            if (auto hit = find_bank(path)) {
++                mode = 0x0017u;
++                size = hit->bank.size;
++                return true;
++            }
++        }
 +        const TocFile *entry = toc_file(path);
 +        if (!entry) return false;
 +        mode = 0x0017u;
@@ -1253,10 +2047,78 @@ index c00c0bf..2d4555b 100644
      if (!entry) return false;
      mode = entry->directory ? 0x0027u : 0x0017u;
 diff --git a/runtime/src/system.cpp b/runtime/src/system.cpp
-index 35802ac..0f7e023 100644
+index 35802ac..41b9de8 100644
 --- a/runtime/src/system.cpp
 +++ b/runtime/src/system.cpp
-@@ -379,7 +379,7 @@ void boot(std::uint32_t entry, const std::vector<std::string> &args) {
+@@ -16,11 +16,20 @@
+ #include "ps2/memory.hpp"
+ #include "ps2/state.hpp"
+ #include "ps2/system.hpp"
++#ifdef PS2_GPU
++#include "gs/gpu/gpu.hpp"
++#endif
+ 
+ #ifdef __EMSCRIPTEN__
+ #include <emscripten.h>
+ #endif
+ 
++#ifdef __ANDROID__
++#include <android/log.h>
++#include <sched.h>
++#include <unistd.h>
++#endif
++
+ #include <algorithm>
+ #include <atomic>
+ #include <cctype>
+@@ -84,6 +93,46 @@ void refill(Cpu &c) {
+ 
+ std::uint64_t frame_cycles() { return kEeClock / (g_options.pal ? 50u : 60u); }
+ 
++// Keeps the latency-critical threads on the fastest CPU cluster on big.LITTLE
++// phones. Android's scheduler otherwise parks the EE thread on a little core
++// while the UI thread idles, which shows up as whole-frame stalls. This is a
++// no-op on desktop and when the topology cannot be read.
++void pin_current_thread(int role) {
++#ifdef __ANDROID__
++    struct Core {
++        int id;
++        long freq;
++    };
++    std::vector<Core> cores;
++    long top = 0;
++    for (int i = 0; i < 32; ++i) {
++        std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(i) + "/cpufreq/cpuinfo_max_freq");
++        long khz = 0;
++        if (!(f >> khz) || khz <= 0) continue;
++        cores.push_back({i, khz});
++        top = std::max(top, khz);
++    }
++    if (cores.size() < 2 || top <= 0) return;
++    cpu_set_t set;
++    CPU_ZERO(&set);
++    int count = 0;
++    std::string picked;
++    for (const Core &c : cores) {
++        const bool fast = static_cast<long long>(c.freq) * 100 >= static_cast<long long>(top) * 85;
++        if (role != 2 && !fast) continue;
++        CPU_SET(c.id, &set);
++        ++count;
++        if (!picked.empty()) picked += ",";
++        picked += std::to_string(c.id);
++    }
++    if (!count) return;
++    if (sched_setaffinity(0, sizeof(set), &set) != 0) return;
++    __android_log_print(ANDROID_LOG_INFO, "GoW2Stats", "[cpu] thread role %d -> cores %s (%ld kHz)", role, picked.c_str(), top);
++#else
++    (void)role;
++#endif
++}
++
+ void dump_frame() {
+     std::vector<std::uint32_t> rgba;
+     std::uint32_t w = 0, h = 0;
+@@ -379,7 +428,7 @@ void boot(std::uint32_t entry, const std::vector<std::string> &args) {
      init_watch();
      hw::reset();
      kernel::reset();
@@ -1265,3 +2127,92 @@ index 35802ac..0f7e023 100644
          std::fprintf(stderr, "[ee] cannot open disc image %s\n", g_options.disc_path.c_str());
      iop::set_trace(g_options.trace_iop_modules, g_options.trace_iop_hle);
      iop::reset();
+@@ -455,22 +504,58 @@ int run() {
+ bool display_frame(std::vector<std::uint32_t> &rgba, std::uint32_t &width, std::uint32_t &height) { return gs::display(rgba, width, height); }
+ bool attach_window(const WindowTarget &t) { return gs::attach_window(static_cast<int>(t.kind), t.display, t.window, t.surface, t.selector, t.width, t.height); }
+ void resize_window(std::uint32_t width, std::uint32_t height) { gs::resize_window(width, height); }
++void set_present_scale(float scale) { gs::set_present_scale(scale); }
+ bool present_frame() { return gs::present(); }
+ void init_graphics() { gs::init(); }
+ void start_render_thread() { gs::start_thread(); }
+ void start_vu_thread() { gs::queue::vu().start(32u << 20); }
+ 
+ std::atomic<double> g_vu_idle_ms{0.0};
++std::atomic<double> g_vu_busy_ms{0.0};
++std::atomic<double> g_render_busy_ms{0.0};
++std::atomic<double> g_present_ms{0.0};
+ 
+ double vu_thread_idle_ms() { return g_vu_idle_ms.load(); }
++double vu_thread_busy_ms() { return g_vu_busy_ms.load(); }
++double render_thread_busy_ms() { return g_render_busy_ms.load(); }
++double present_ms() { return g_present_ms.load(); }
+ std::uint64_t vu1_interpreted_calls() { return vu::interpreted_calls(); }
+ 
++std::uint64_t gpu_upload_bytes() {
++#ifdef PS2_GPU
++    return gs::gpu::upload_bytes();
++#else
++    return 0;
++#endif
++}
++
++std::uint64_t gpu_dispatches() {
++#ifdef PS2_GPU
++    return gs::gpu::dispatch_count();
++#else
++    return 0;
++#endif
++}
++
++const char *gpu_device_name() {
++#ifdef PS2_GPU
++    const char *name = gs::gpu::adapter_description();
++    return name && *name ? name : "software";
++#else
++    return "software";
++#endif
++}
++
++void pin_thread(int role) { pin_current_thread(role); }
++
+ void run_vu_thread() {
++    pin_current_thread(2);
+     gs::queue::role() = gs::queue::Role::Vu;
+     gs::queue::Ring &in = gs::queue::vu();
+     for (;;) {
+         gs::queue::Header h;
+         const std::uint8_t *payload = nullptr;
++        const auto busy_start = std::chrono::steady_clock::now();
+         while (in.peek(h, payload)) {
+             switch (h.type) {
+             case gs::queue::kVif1: vif::transfer(1, payload, h.arg0); break;
+@@ -487,6 +572,7 @@ void run_vu_thread() {
+             }
+             in.pop(h);
+         }
++        g_vu_busy_ms.fetch_add(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - busy_start).count(), std::memory_order_relaxed);
+         const auto start = std::chrono::steady_clock::now();
+         in.wait_for_work(50);
+         g_vu_idle_ms.store(g_vu_idle_ms.load() + std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+@@ -497,15 +583,20 @@ void post_present() { gs::post_present(); }
+ Rendered render_pending(bool surface, const std::function<void(const std::uint32_t *, std::uint32_t, std::uint32_t)> &copy,
+                         const std::function<void()> &before_present, double budget_ms) {
+     static std::vector<std::uint32_t> frame;
+-    return gs::render_pending([&](const gs::DisplayRegs &regs) {
++    const auto started = std::chrono::steady_clock::now();
++    Rendered result = gs::render_pending([&](const gs::DisplayRegs &regs) {
+         if (before_present) before_present();
+         if (surface) {
++            const auto present_start = std::chrono::steady_clock::now();
+             gs::present(regs);
++            g_present_ms.fetch_add(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - present_start).count(), std::memory_order_relaxed);
+             return;
+         }
+         std::uint32_t width = 0, height = 0;
+         if (copy && gs::copy_frame(regs, frame, width, height)) copy(frame.data(), width, height);
+     }, budget_ms);
++    g_render_busy_ms.fetch_add(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(), std::memory_order_relaxed);
++    return result;
+ }
+ 
+ void wait_render_work(int timeout_ms) { gs::queue::render().wait_for_work(timeout_ms); }

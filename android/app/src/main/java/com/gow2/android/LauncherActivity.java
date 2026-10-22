@@ -9,6 +9,7 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
@@ -21,8 +22,17 @@ import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.Locale;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 public final class LauncherActivity extends Activity {
     static final String PREFS = "gow2";
@@ -30,7 +40,11 @@ public final class LauncherActivity extends Activity {
     static final String KEY_WIDESCREEN = "widescreen";
     static final String KEY_SCALE = "scale";
     static final String KEY_TOUCH_ALPHA = "touch_alpha";
+    static final String KEY_DRIVER_PATH = "driver_path";
+    static final String KEY_TURBO = "turbo_clock";
+    static final String KEY_DRS = "dynamic_resolution";
     private static final int REQ_ISO = 1001;
+    private static final int REQ_DRIVER = 1002;
 
     private TextView status;
     private Button play;
@@ -207,6 +221,76 @@ public final class LauncherActivity extends Activity {
         dimParams.topMargin = dp(8);
         content.addView(dim, dimParams);
 
+        CheckBox drs = new CheckBox(this);
+        drs.setText("Dynamic resolution (recommended)");
+        drs.setTextColor(Color.rgb(230, 224, 214));
+        drs.setChecked(prefs.getBoolean(KEY_DRS, true));
+        LinearLayout.LayoutParams drsParams = matchWrap();
+        drsParams.topMargin = dp(8);
+        content.addView(drs, drsParams);
+
+        TextView drsHint = new TextView(this);
+        drsHint.setText("Lowers only the Android swapchain scale when the GPU misses frame time. "
+                + "PS2 render scale and image geometry stay unchanged; Mali and Adreno both use it.");
+        drsHint.setTextColor(Color.rgb(160, 154, 146));
+        drsHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        content.addView(drsHint, matchWrap());
+
+        final CheckBox turbo;
+        if (isAdreno()) {
+            TextView driverLabel = new TextView(this);
+            driverLabel.setText("GPU driver (Adreno)");
+            driverLabel.setTextColor(Color.rgb(205, 170, 120));
+            driverLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            LinearLayout.LayoutParams driverLabelParams = matchWrap();
+            driverLabelParams.topMargin = dp(16);
+            content.addView(driverLabel, driverLabelParams);
+
+            String saved = prefs.getString(KEY_DRIVER_PATH, null);
+            TextView driverStatus = new TextView(this);
+            driverStatus.setText(saved == null ? "Active: system Vulkan driver"
+                    : "Active: " + new File(saved).getName());
+            driverStatus.setTextColor(Color.rgb(230, 224, 214));
+            driverStatus.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            content.addView(driverStatus, matchWrap());
+
+            TextView driverHint = new TextView(this);
+            driverHint.setText("Optional. Import an AdrenoTools driver package (.zip) or a libvulkan*.so file. "
+                    + "Leave this on the system driver if the custom one is slower or unstable.");
+            driverHint.setTextColor(Color.rgb(160, 154, 146));
+            driverHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+            LinearLayout.LayoutParams driverHintParams = matchWrap();
+            driverHintParams.bottomMargin = dp(6);
+            content.addView(driverHint, driverHintParams);
+
+            Button pickDriver = makeButton("SELECT DRIVER (.zip / .so)", Color.rgb(58, 54, 50));
+            pickDriver.setOnClickListener(v -> pickDriver());
+            LinearLayout.LayoutParams pickParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(48));
+            content.addView(pickDriver, pickParams);
+
+            Button systemDriver = makeButton("USE SYSTEM DRIVER", Color.rgb(42, 40, 38));
+            systemDriver.setOnClickListener(v -> {
+                prefs.edit().remove(KEY_DRIVER_PATH).apply();
+                driverStatus.setText("Active: system Vulkan driver");
+                Toast.makeText(this, "The system Vulkan driver will be used next start", Toast.LENGTH_LONG).show();
+            });
+            LinearLayout.LayoutParams systemParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(48));
+            systemParams.topMargin = dp(6);
+            content.addView(systemDriver, systemParams);
+
+            turbo = new CheckBox(this);
+            turbo.setText("Turbo clock (force maximum GPU clocks)");
+            turbo.setTextColor(Color.rgb(230, 224, 214));
+            turbo.setChecked(prefs.getBoolean(KEY_TURBO, false));
+            LinearLayout.LayoutParams turboParams = matchWrap();
+            turboParams.topMargin = dp(10);
+            content.addView(turbo, turboParams);
+        } else {
+            turbo = null;
+        }
+
         TextView note = new TextView(this);
         note.setText("Changes apply the next time you start the game. Saves are written to the app's memory-card file and survive updates.");
         note.setTextColor(Color.rgb(160, 154, 146));
@@ -215,19 +299,117 @@ public final class LauncherActivity extends Activity {
         noteParams.topMargin = dp(8);
         content.addView(note, noteParams);
 
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content);
+
         new AlertDialog.Builder(this)
                 .setTitle("Settings")
-                .setView(content)
+                .setView(scroll)
                 .setPositiveButton("Done", (dialog, which) -> {
                     prefs.edit()
                             .putBoolean(KEY_WIDESCREEN, widescreen.isChecked())
                             .putInt(KEY_SCALE, scales.getCheckedRadioButtonId() == 2 ? 2 : 1)
                             .putFloat(KEY_TOUCH_ALPHA, dim.isChecked() ? 0.55f : 0.86f)
+                            .putBoolean(KEY_DRS, drs.isChecked())
+                            .putBoolean(KEY_TURBO, turbo != null && turbo.isChecked())
                             .apply();
                     refresh();
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    static boolean isAdreno() {
+        if (new File("/dev/kgsl-3d0").exists()) return true;
+        String hardware = (Build.HARDWARE + " " + Build.BOARD + " " + Build.DEVICE).toLowerCase(Locale.US);
+        return hardware.contains("qcom") || hardware.contains("msm") || hardware.contains("adreno");
+    }
+
+    private void pickDriver() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        startActivityForResult(intent, REQ_DRIVER);
+    }
+
+    private void importDriver(Uri uri) {
+        String display = displayName(uri);
+        if (display == null) display = "driver";
+        String safe = display.replaceAll("[^A-Za-z0-9._-]", "_");
+        // Keep the folder inside files/gpu-drivers even for names like "..".
+        safe = safe.replaceAll("^\\.+", "");
+        if (safe.isEmpty()) safe = "driver";
+        File dir = new File(getFilesDir(), "gpu-drivers/" + safe);
+        deleteTree(dir);
+        if (!dir.mkdirs() && !dir.isDirectory()) {
+            Toast.makeText(this, "Could not create the driver folder", Toast.LENGTH_LONG).show();
+            return;
+        }
+        File chosen = null;
+        try {
+            String lower = display.toLowerCase(Locale.US);
+            if (lower.endsWith(".zip")) {
+                try (InputStream raw = getContentResolver().openInputStream(uri);
+                     ZipInputStream zip = new ZipInputStream(raw)) {
+                    ZipEntry entry;
+                    while ((entry = zip.getNextEntry()) != null) {
+                        String entryName = entry.getName();
+                        String entryLower = entryName.toLowerCase(Locale.US);
+                        if (!entryLower.endsWith(".so")) continue;
+                        File out = new File(dir, new File(entryName).getName());
+                        try (OutputStream stream = new FileOutputStream(out)) {
+                            copyStream(zip, stream);
+                        }
+                        if (chosen == null || out.getName().toLowerCase(Locale.US).contains("vulkan")) chosen = out;
+                    }
+                }
+            } else if (lower.endsWith(".so")) {
+                File out = new File(dir, safe.endsWith(".so") ? safe : safe + ".so");
+                try (InputStream in = getContentResolver().openInputStream(uri);
+                     OutputStream stream = new FileOutputStream(out)) {
+                    copyStream(in, stream);
+                }
+                chosen = out;
+            } else {
+                Toast.makeText(this, "Select a .zip driver package or a .so library", Toast.LENGTH_LONG).show();
+                return;
+            }
+        } catch (Exception e) {
+            Toast.makeText(this, "Driver import failed: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (chosen == null) {
+            Toast.makeText(this, "No driver library found in that package", Toast.LENGTH_LONG).show();
+            return;
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_DRIVER_PATH, chosen.getAbsolutePath()).apply();
+        Toast.makeText(this, "Driver imported: " + chosen.getName() + ". It is used the next time you start the game.", Toast.LENGTH_LONG).show();
+    }
+
+    private static void copyStream(InputStream in, OutputStream out) throws Exception {
+        byte[] buffer = new byte[1 << 16];
+        int read;
+        while ((read = in.read(buffer)) > 0) out.write(buffer, 0, read);
+    }
+
+    private static void deleteTree(File file) {
+        if (file == null || !file.exists()) return;
+        File[] children = file.listFiles();
+        if (children != null) for (File child : children) deleteTree(child);
+        file.delete();
+    }
+
+    private String displayName(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (column >= 0 && !cursor.isNull(column)) return cursor.getString(column);
+            }
+        } catch (Exception ignored) {
+        }
+        String path = uri.getLastPathSegment();
+        return path == null ? null : new File(path).getName();
     }
 
     private void refresh() {
@@ -289,6 +471,10 @@ public final class LauncherActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_DRIVER) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) importDriver(data.getData());
+            return;
+        }
         if (requestCode != REQ_ISO || resultCode != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         try {

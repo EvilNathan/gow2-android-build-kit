@@ -4,7 +4,7 @@ This file records what was actually tested while the kit was assembled. It is
 not a guarantee for your machine, but it tells you which parts have been run
 end to end and which parts have not.
 
-Date: 2026-10-21. Host: Windows 11, LLVM/Clang, Ninja, Python 3, JDK 17,
+Date: 2026-10-22. Host: Windows 11, LLVM/Clang, Ninja, Python 3, JDK 17,
 Android SDK platform 35, NDK 27.3.13750724, CMake 3.30.5.
 
 ## Passed
@@ -33,11 +33,14 @@ Android SDK platform 35, NDK 27.3.13750724, CMake 3.30.5.
   outputs was run through `setup.ps1`, `build-tools.ps1`,
   `extract-disc.ps1`, `recompile.ps1 -SkipExplore`, and `build-android.ps1`.
   The result was an installable debug APK.
-- **APK structure.** The APK contains a single native library
-  (`lib/arm64-v8a/libmain.so`), exports `SDL_main` and
-  `Java_com_gow2_android_TouchOverlayView_nativeSetPad`, has ELF `LOAD`
-  alignment `0x4000` (16 KB compatible), sets `extractNativeLibs=true`, is
-  debug-signed, and does not package `libwgpu_native.so`.
+- **APK structure.** The APK contains `lib/arm64-v8a/libmain.so` and the four
+  libadrenotools hook libraries (`libhook_impl.so`, `libmain_hook.so`,
+  `libfile_redirect_hook.so`, `libgsl_alloc_hook.so`). It exports `SDL_main`,
+  `ps2_android_vulkan_prepare`, and
+  `Java_com_gow2_android_TouchOverlayView_nativeSetPad`; every `.so` has ELF
+  `LOAD` alignment `0x4000` (16 KB compatible); the merged manifest sets
+  `extractNativeLibs=true`; the APK is debug-signed and does not package
+  `libwgpu_native.so`.
 
 ## Performance update (2026-10-21, APK v1.1 / kit v0.1.1)
 
@@ -69,18 +72,65 @@ touch JNI exported). `engine.patch` re-applies to a fresh checkout at
 `6526f4803d98e10de50bea3af104a4d26e9df033` (`git apply --ignore-whitespace`)
 and the tools build from it.
 
+## v2.0 Adreno Edition (2026-10-22)
+
+Build and packaging checks passed:
+
+- Desktop `ps2run` rebuilt with the v2.0 diagnostics, CPU-affinity, DRS, and
+  989SND changes; a 1000-frame scripted headless run completed with 797,344
+  stereo audio frames and no crash.
+- Android APK rebuilt from a clean `android/app/build` as `versionCode 3` /
+  `versionName "2.0"`, arm64-v8a, 13,177,473 bytes. `aapt2 dump badging`
+  reports `sdkVersion 26`, `targetSdkVersion 35`; `aapt2 dump xmltree` reports
+  `extractNativeLibs=true`. A previous incremental package was 26.1 MB because
+  zipflinger left stale padding in place; `build-android.ps1` now removes the
+  variant output directory before packaging. A clean package and a repeated
+  incremental package both produced 13,177,473 bytes.
+- All five native libraries in the APK have `LOAD` align `0x4000`.
+  `libmain.so` contains `ps2_android_vulkan_prepare`, `adrenotools_open_libvulkan`,
+  `adrenotools_set_turbo`, and the `dlopen`/`dlclose` interposer. Android
+  `main()` calls `ps2_android_vulkan_prepare()` before wgpu creates its Vulkan
+  instance.
+- Android builds use ThinLTO, `--gc-sections`, and `--icf=all` by default.
+  `PS2_ANDROID_LTO=OFF` is available for fast iteration.
+- CPU affinity reads the maximum-frequency table and pins the EE/render
+  threads to the fastest cluster; the VU thread is allowed on all cores.
+  The code is Android-only and fails open if the sysfs table is unreadable.
+- DRS is swapchain-only: `show_speed()` runs immediately before `present()`
+  on the render thread, adjusts `0.6–1.0` using GPU/present frame time, and
+  logs `DRS %.2fx` in `GoW2Stats`. It is on by default on Android and can be
+  disabled in Settings (`PS2_DRS=0`).
+- 989SND trace: SMPD receives `SBP_general`/`SBP_general2` over SIF RPC and
+  loads them as WAD resources; boot audio is non-silent. `io.cpp` now scans
+  WADs for `SBP_*`, validates the `SBlk` header, and can serve a virtual
+  `host1:sound/*.bnk`. No actual `.bnk` request was observed in the headless
+  traces, and one scripted Start-press run printed a non-fatal
+  `989 ERROR 55 84010002` without a preceding bank request. That error is not
+  yet root-caused; it needs a hardware logcat capture.
+- `scripts/build-android.ps1` completed successfully. The APK is at
+  `dist/gow2-debug.apk`.
+
 ## Not verified
 
-- **Performance update on hardware.** The v1.1 APK has not run on the
+- **Performance update on hardware.** The v1.1/v2.0 APK has not run on the
   reporter's phone yet. The expected workflow is `adb logcat -d -s
   GoW2Stats` during play, after which the present-mode/quality knobs can be
   adjusted against real numbers.
-- **Dynamic resolution.** Only fixed 1x/2x render scaling exists.
+- **Dynamic resolution on hardware.** The controller and swapchain resize are
+  implemented and compile, but the actual scale changes, visual quality, and
+  frame-time response need a device.
+- **Adreno driver replacement and turbo.** The APK contains libadrenotools and
+  the interposer, and the opt-in path is wired to the launcher, but no custom
+  driver has been loaded on a phone. Turbo's KGSL ioctl may be denied without
+  root; it silently no-ops in that case. Mali/other vendors always use the
+  stock driver and were not device-tested either.
 - **Full VU exploration in the clean kit.** The clean-kit workflow was
   validated with `-SkipExplore`; the 78-program VU capture came from the
   assembly workspace. A fresh full run records its own programs on your
   machine.
-- **Complete audio.** Some `sound/*.bnk` requests are still unserved, so
-  bank-driven music, voice, or effects may be missing. The WAD-backed audio
-  path works.
+- **Complete audio.** The `SBP_*` parser/virtual `.bnk` service is implemented,
+  but the runtime `.bnk` request names have not been captured and the menu
+  `989 ERROR 55` is not root-caused. Bank-driven music, voice, or effects may
+  still be missing on specific screens.
+- **Raw Vulkan backend.** Not implemented; wgpu-native remains the renderer.
 - **Release signing.** The kit builds a debug-signed APK.

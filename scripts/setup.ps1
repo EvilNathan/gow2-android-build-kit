@@ -6,6 +6,7 @@ param(
 
 $pin = "6526f4803d98e10de50bea3af104a4d26e9df033"
 $engineRepo = "https://github.com/snuri00/ps2-web-recomp.git"
+$adrenotoolsPin = "8fae8ce254dfc1344527e05301e43f37dea2df80"
 $patch = Join-Path $Root "engine.patch"
 
 Write-Step "Checking prerequisites"
@@ -44,15 +45,20 @@ if ($head -ne $pin) {
     Invoke-Checked git @("-C", $Engine, "checkout", "--quiet", $pin)
 }
 
-$alreadyPatched = (Test-Path (Join-Path $Engine "host\android_jni.cpp")) -and
-                  (Select-String -Path (Join-Path $Engine "runtime\src\iop\io.cpp") -Pattern "GODOFWAR.TOC" -Quiet)
-if (-not $alreadyPatched) {
-    & git -C $Engine apply --check --ignore-whitespace $patch
-    if ($LASTEXITCODE -ne 0) {
-        throw "engine.patch does not apply to this engine checkout. Delete engine\ and rerun."
-    }
+$patchApplied = $false
+& git -C $Engine apply --check --ignore-whitespace $patch 2>$null
+if ($LASTEXITCODE -eq 0) {
     Invoke-Checked git @("-C", $Engine, "apply", "--ignore-whitespace", $patch)
 } else {
+    # The forward check fails when the patch is already applied. Verify that
+    # the current tree is exactly the patched state before assuming that.
+    & git -C $Engine apply --reverse --check --ignore-whitespace $patch 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "engine.patch does not apply to this engine checkout and the tree is not already patched. Delete engine\ and rerun."
+    }
+    $patchApplied = $true
+}
+if ($patchApplied) {
     Write-Host "GoW2 Android patch already applied."
 }
 
@@ -109,7 +115,28 @@ if (-not (Test-Path (Join-Path $wgpu "lib\libwgpu_native.a"))) {
     Write-Host "wgpu-native Android library present."
 }
 
+Write-Step "libadrenotools (Adreno driver replacement)"
+$adreno = Join-Path $thirdParty "libadrenotools"
+if ($ForceDeps) { Remove-Item $adreno -Recurse -Force -ErrorAction SilentlyContinue }
+if (-not (Test-Path (Join-Path $adreno "CMakeLists.txt"))) {
+    if (Test-Path $adreno) { Remove-Item $adreno -Recurse -Force }
+    Invoke-Checked git @("clone", "--depth", "1", "--recurse-submodules", "--shallow-submodules",
+        "https://github.com/bylaws/libadrenotools.git", $adreno)
+}
+if (Test-Path (Join-Path $adreno ".git")) {
+    $adrenoHead = (& git -C $adreno rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -eq 0 -and $adrenoHead -ne $adrenotoolsPin) {
+        & git -C $adreno fetch --depth 1 origin $adrenotoolsPin
+        if ($LASTEXITCODE -eq 0) { & git -C $adreno checkout --quiet $adrenotoolsPin }
+    }
+    Invoke-Checked git @("-C", $adreno, "submodule", "update", "--init", "--depth", "1")
+}
+if (-not (Test-Path (Join-Path $adreno "lib\linkernsbypass\CMakeLists.txt"))) {
+    throw "libadrenotools is incomplete (linkernsbypass submodule missing). Delete engine\third_party\libadrenotools and rerun."
+}
+
 Write-Step "Done"
 Write-Host "Engine:  $Engine"
 Write-Host "SDL3:    $sdl"
 Write-Host "wgpu:    $wgpu"
+Write-Host "adreno:  $adreno"

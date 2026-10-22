@@ -1,6 +1,7 @@
 package com.gow2.android;
 
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
@@ -30,11 +31,14 @@ public final class GameActivity extends SDLActivity {
             finish();
             return;
         }
-        int scale = getSharedPreferences(LauncherActivity.PREFS, MODE_PRIVATE)
-                .getInt(LauncherActivity.KEY_SCALE, 1);
+        applyGpuPreferences();
+        SharedPreferences prefs = getSharedPreferences(LauncherActivity.PREFS, MODE_PRIVATE);
+        int scale = prefs.getInt(LauncherActivity.KEY_SCALE, 1);
         try {
             // Read by the WebGPU renderer when it creates its device.
             Os.setenv("PS2_SCALE", String.valueOf(scale == 2 ? 2 : 1), true);
+            // Swapchain-only dynamic resolution; the PS2 framebuffer stays 1x/2x.
+            Os.setenv("PS2_DRS", prefs.getBoolean(LauncherActivity.KEY_DRS, true) ? "1" : "0", true);
         } catch (Exception ignored) {
         }
         super.onCreate(savedInstanceState);
@@ -45,6 +49,29 @@ public final class GameActivity extends SDLActivity {
         mLayout.addView(overlay, new RelativeLayout.LayoutParams(
                 RelativeLayout.LayoutParams.MATCH_PARENT,
                 RelativeLayout.LayoutParams.MATCH_PARENT));
+    }
+
+    private void applyGpuPreferences() {
+        try {
+            SharedPreferences prefs = getSharedPreferences(LauncherActivity.PREFS, MODE_PRIVATE);
+            if (!LauncherActivity.isAdreno()) return; // Mali and other vendors keep the stock driver
+            String driver = prefs.getString(LauncherActivity.KEY_DRIVER_PATH, null);
+            if (driver != null) {
+                File file = new File(driver);
+                if (file.isFile()) {
+                    File tmp = new File(getFilesDir(), "gpu-drivers/tmp");
+                    tmp.mkdirs();
+                    Os.setenv("PS2_VK_DRIVER", file.getAbsolutePath(), true);
+                    Os.setenv("PS2_VK_HOOK_DIR", getApplicationInfo().nativeLibraryDir, true);
+                    Os.setenv("PS2_VK_TMP", tmp.getAbsolutePath(), true);
+                }
+            }
+            if (prefs.getBoolean(LauncherActivity.KEY_TURBO, false)) {
+                Os.setenv("PS2_TURBO", "1", true);
+            }
+        } catch (Exception ignored) {
+            // A missing or unreadable driver simply leaves the system driver in place.
+        }
     }
 
     private boolean openIso() {
