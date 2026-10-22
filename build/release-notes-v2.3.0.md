@@ -83,6 +83,12 @@ registered` confirms the filter is active.
 - Native runner rebuilt with the filter and tested in all three modes:
   `117/117` by default, `112/117` with the five hashes in `PS2_VU_SKIP`, and
   the interpreter message with `PS2_VU_AOT=0`.
+- Interpreter fallback regression: 300-frame and 3,500-frame headless runs with
+  the five skipped completed (17,206,164,887 cycles, exit 0). A 300-frame run
+  with all 117 enabled also completed, so the desktop runtime does not reproduce
+  the phone crash in early boot.
+- `engine.patch` (113,680 bytes) applies cleanly to a pristine engine checkout
+  at `6526f48`.
 - APK: versionCode 6 / 2.3, arm64-v8a, `dlopen`/`dlclose` remain undefined
   imports (nothing exported by the app), every `LOAD` segment is 16 KB aligned.
 - Java settings strings and the native `PS2_VU_SKIP` strings are present in the
