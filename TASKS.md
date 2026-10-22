@@ -27,11 +27,19 @@ default** and exposes a per-program diagnostic switch in Settings. The exact
 offending program still needs a device test (no phone attached to this build
 machine).
 
-## Status snapshot (2026-10-22, fourth pass — v2.2)
-- Android APK builds: **yes** — `dist/gow2-debug.apk`, versionCode 5 /
-  versionName 2.2, arm64-v8a, with `libmain.so` + libadrenotools hook libs.
+## Status snapshot (2026-10-22, fifth pass — v2.3)
+- Android APK builds: **yes** — `dist/gow2-debug.apk`, versionCode 6 /
+  versionName 2.3, arm64-v8a, with `libmain.so` + libadrenotools hook libs.
   `dlopen`/`dlclose` are plain imports (nothing exported).
   `extractNativeLibs=true`; all five `.so` files have `LOAD` align `0x4000`.
+  13,192,938 bytes, sha256
+  `B612E1BA300053041C08358E6C9ECE04384296A5F12D9BEE61C3EF65AFBF577F`.
+  Uploaded as release `v2.3.0` in `EvilNathan/gow2-android-apk`; download-back
+  hash matches.
+- v2.3 VU1 AOT hotfix: **built, device confirmation pending** — the five
+  programs added in 2.0 are skipped by default (112/117 registered), with a
+  Settings master switch and one toggle per program. Native runner verified in
+  all three modes (`117/117`, `112/117`, all-interpreter).
 - UI: **new launcher** — two-column landscape layout, bronze/gold theme, adaptive
   omega icon, cards for controls and diagnostics, ripple buttons.
 - Logs: **`/sdcard/gow2/log.txt`** — native `[boot]`/`[gpu]`/`[window]`/`[ee]`
@@ -125,6 +133,7 @@ machine).
 - [x] Android build: single `libmain.so`, 16 KB LOAD alignment, `extractNativeLibs=true`
 - [x] Clean/repeatable APK packaging; `build-android.ps1` removes the variant output first to avoid zipflinger stale padding
 - [x] APK version bumped to `versionCode 3` / `versionName "2.0"` (manifest + Gradle)
+- [x] APK version bumped to `versionCode 6` / `versionName "2.3"` for the VU1 hotfix
 - [x] 16 KB linker flags applied to libadrenotools hook `.so` targets
 - [x] `ps2_android_vulkan_prepare()` called from Android `main()` before wgpu creates its Vulkan instance
 - [x] README / VERIFICATION.md v2.0
@@ -138,6 +147,8 @@ machine).
 - [x] Runtime filter `PS2_VU_AOT=0` (all-interpreter) and `PS2_VU_SKIP=<hashes>` in `runtime/src/vu_micro.cpp`
 - [x] Android defaults: five new programs skipped; saver settings checkbox `Compiled VU1 microcode (AOT)` plus one toggle per program
 - [x] `[app] game start: ... vu_aot=... vu_skip=...` written to `/sdcard/gow2/log.txt`
+- [x] v2.3 APK built and uploaded: 13,192,938 bytes, sha256 `B612E1BA…577F`,
+  release `v2.3.0`; download-back hash matches
 - [ ] **Device confirmation**: install v2.3, boot, then enable one program at a time from Settings; record the hash that crashes
 - [ ] Fix `vurecomp`/codegen for the offending program (or keep it on the interpreter permanently; cost is small)
 - [ ] Long headless run (3,500+ frames) with all five enabled under ASan/UBSan

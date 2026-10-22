@@ -21,21 +21,51 @@ window, audio device, gamepads, and lifecycle handling.
 | --- | --- |
 | Recompiler tools (`eerecomp`, `vurecomp`) build on Windows | ✅ passing |
 | Emotion Engine translation of the USA disc | ✅ 477,499 instructions → 118 C++ units |
-| VU1 AOT compilation | ✅ 117 programs compiled from 86 captured blocks |
+| VU1 AOT compilation | ✅ 117 programs compiled from 86 captured blocks; the five added in 2.0 are skipped by default in 2.3 |
 | Native runner (`ps2run`) build | ✅ passing |
 | Boot: title → difficulty menu → intro cutscenes → Loom Chamber | ✅ verified (frame 3,500) |
 | 3D rendering with characters, textures, animation | ✅ verified in software-GS headless run |
 | SPU2 audio output | ✅ non-silent stereo verified (6.9 s capture) |
 | 989SND bank coverage (`sound/*.bnk`) | ⚠️ WAD `SBP_*` scanner + virtual `.bnk` service implemented; runtime `.bnk` capture pending |
-| Android APK build (`assembleDebug`) | ✅ passing (version 5 / 2.2, arm64-v8a) |
+| Android APK build (`assembleDebug`) | ✅ passing (version 6 / 2.3, arm64-v8a) |
 | 16 KB page compatibility | ✅ `libmain.so` + hook libs `LOAD` align `0x4000`, `extractNativeLibs=true` |
 | Memory-card save/load | ⚠️ implemented, in-game save not yet exercised |
 | First device run (mid-range phone, 8 GB RAM) | ⚠️ booted to gameplay, but too slow to play on v1.0 |
 | Performance update v1.1 (FIFO present, tuned pacing, Android surface cap, runtime deinterlace switch, logcat stats) | ✅ shipped, device re-test pending |
 | **v2.0 Adreno Edition** (ThinLTO, gc-sections, ICF, CPU affinity, DRS, optional Adreno driver + turbo) | ⚠️ implemented; crashed on a user device at Play |
 | **v2.1 Safety & Universal** (no exported `dlopen`, adapter limits, DRS opt-in, safe mode, boot logcat) | ✅ built; device re-test pending |
+| **v2.3 VU1 AOT hotfix** (five 2.0 programs skipped by default, per-program Settings toggles, `PS2_VU_SKIP`/`PS2_VU_AOT`) | ✅ built; device confirmation pending |
 | Mali-G68/G77 30 fps target | ❌ not yet measured on hardware |
 | Dynamic resolution | ✅ swapchain-only 0.6–1.0, opt-in on every platform, Settings toggle |
+
+## v2.3 VU1 AOT hotfix
+
+Download: [`v2.3.0`](https://github.com/EvilNathan/gow2-android-apk/releases/tag/v2.3.0)
+(private repo; asset `gow2-debug.apk`, 13,192,938 bytes, sha256
+`B612E1BA300053041C08358E6C9ECE04384296A5F12D9BEE61C3EF65AFBF577F`).
+
+Sixth build. The first evidence-backed fix for the v2.0-v2.2 "closes at Play"
+crash:
+
+- **Binary evidence.** v1.0.0 and v1.1.0 `libmain.so` contain 112 of the 117 VU1
+  AOT program hashes; v2.0.0-v2.2.0 contain all 117. The five added in 2.0 are
+  `4176D02B93877C36`, `54781DABBA793231`, `758DC1364D0BF01B`,
+  `E344F110E1EBEEDC`, `EF764AF45D6D7189`. v1.x ran them on the interpreter, so
+  the same scenes were safe.
+- **Five skipped by default.** The game starts with the v1.x program set
+  (`[vu] AOT programs registered: 112/117`); the five fall back to the
+  interpreter until each one is verified on hardware.
+- **Per-program bisect.** Settings → **VU1 AOT (diagnostic)** has a master
+  checkbox plus one checkbox per program, all off after a fresh install. Enable
+  them one at a time to find the one that crashes a specific device.
+- **Runtime controls.** `PS2_VU_AOT=0` disables AOT entirely;
+  `PS2_VU_SKIP=<hash>,<hash>,...` skips individual programs. The active set is
+  logged at game start (`vu_aot`, `vu_skip`) and by the native runtime.
+- **Version** 6 / 2.3.
+
+If 2.3 still closes, the five were not the cause; the next bisect is the rest of
+the v2.0 engine changes (read-ahead, SBP scanner, affinity, ThinLTO/ICF,
+adrenotools), documented in `TASKS.md` Fase 7.
 
 ## v2.2 UI & logs
 
