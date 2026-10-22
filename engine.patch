@@ -2590,3 +2590,61 @@ index 35802ac..c6e782d 100644
  }
  
  void wait_render_work(int timeout_ms) { gs::queue::render().wait_for_work(timeout_ms); }
+diff --git a/runtime/src/vu_micro.cpp b/runtime/src/vu_micro.cpp
+index fb1a090..b6129f3 100644
+--- a/runtime/src/vu_micro.cpp
++++ b/runtime/src/vu_micro.cpp
+@@ -12,6 +12,7 @@
+ #include "ps2/state.hpp"
+ 
+ #include <atomic>
++#include <cctype>
+ #include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -767,9 +768,43 @@ void code_changed(int unit) {
+     ++g_generation[unit & 1];
+ }
+ 
++bool skipped_program(std::uint64_t key) {
++    // PS2_VU_SKIP is a comma-separated list of 16-digit VU1 microcode hashes.
++    // The Android launcher uses it to keep the programs that were added in 2.0
++    // on the interpreter until each one is verified on hardware.
++    static const std::string spec = [] {
++        const char *env = std::getenv("PS2_VU_SKIP");
++        return env ? std::string(env) : std::string();
++    }();
++    if (spec.empty()) return false;
++    const char *p = spec.c_str();
++    while (*p) {
++        while (*p == ',' || std::isspace(static_cast<unsigned char>(*p))) ++p;
++        if (!*p) break;
++        char *end = nullptr;
++        const unsigned long long value = std::strtoull(p, &end, 16);
++        if (end == p) break;
++        if (value == key) return true;
++        p = end;
++    }
++    return false;
++}
++
+ void register_programs(const Program *programs, std::uint32_t count) {
+-    for (std::uint32_t i = 0; i < count; ++i)
+-        if (programs[i].function) g_programs[programs[i].key] = programs[i].function;
++    const char *aot = std::getenv("PS2_VU_AOT");
++    if (aot && aot[0] == '0' && aot[1] == '\0') {
++        std::fprintf(stderr, "[vu] AOT disabled (PS2_VU_AOT=0), using the interpreter\n");
++        return;
++    }
++    std::uint32_t kept = 0;
++    for (std::uint32_t i = 0; i < count; ++i) {
++        if (!programs[i].function) continue;
++        if (skipped_program(programs[i].key)) continue;
++        g_programs[programs[i].key] = programs[i].function;
++        ++kept;
++    }
++    std::fprintf(stderr, "[vu] AOT programs registered: %u/%u\n",
++                 static_cast<unsigned>(kept), static_cast<unsigned>(count));
+ }
+ 
+ void kick(int unit, std::uint32_t address) {

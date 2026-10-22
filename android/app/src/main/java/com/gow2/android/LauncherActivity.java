@@ -54,6 +54,17 @@ public final class LauncherActivity extends Activity {
     static final String KEY_DRS = "dynamic_resolution";
     static final String KEY_SAFE = "safe_mode";
     static final String KEY_FPS30 = "fps_cadence_30";
+    static final String KEY_VU_AOT = "vu_aot";
+    static final String KEY_VU_NEW = "vu_new_";
+    // VU1 programs that first appeared in APK 2.0 (117-program AOT table).
+    // Kept disabled by default (interpreter) until each is verified on hardware.
+    static final String[] VU_NEW = {
+            "4176D02B93877C36",
+            "54781DABBA793231",
+            "758DC1364D0BF01B",
+            "E344F110E1EBEEDC",
+            "EF764AF45D6D7189",
+    };
     private static final int REQ_ISO = 1001;
     private static final int REQ_DRIVER = 1002;
 
@@ -478,6 +489,44 @@ public final class LauncherActivity extends Activity {
         safeHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         content.addView(safeHint, matchWrap());
 
+        TextView vuLabel = new TextView(this);
+        vuLabel.setText("VU1 AOT (diagnostic)");
+        vuLabel.setTextColor(Color.rgb(205, 170, 120));
+        vuLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        LinearLayout.LayoutParams vuLabelParams = matchWrap();
+        vuLabelParams.topMargin = dp(16);
+        content.addView(vuLabel, vuLabelParams);
+
+        CheckBox vuAot = new CheckBox(this);
+        vuAot.setText("Compiled VU1 microcode (AOT)");
+        vuAot.setTextColor(Color.rgb(230, 224, 214));
+        vuAot.setChecked(prefs.getBoolean(KEY_VU_AOT, true));
+        content.addView(vuAot, matchWrap());
+
+        TextView vuHint = new TextView(this);
+        vuHint.setText("If the game closes on launch, leave the five 2.0 programs below disabled: "
+                + "they run on the interpreter instead (slower, always correct). "
+                + "Enable one at a time to find the program that crashes this device.");
+        vuHint.setTextColor(Color.rgb(160, 154, 146));
+        vuHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        content.addView(vuHint, matchWrap());
+
+        final CheckBox[] vuNew = new CheckBox[VU_NEW.length];
+        for (int i = 0; i < VU_NEW.length; ++i) {
+            CheckBox box = new CheckBox(this);
+            box.setText("Enable " + VU_NEW[i].substring(0, 8) + " (new in 2.0)");
+            box.setTextColor(Color.rgb(230, 224, 214));
+            box.setChecked(prefs.getBoolean(KEY_VU_NEW + VU_NEW[i], false));
+            box.setEnabled(vuAot.isChecked());
+            LinearLayout.LayoutParams boxParams = matchWrap();
+            boxParams.topMargin = dp(2);
+            content.addView(box, boxParams);
+            vuNew[i] = box;
+        }
+        vuAot.setOnCheckedChangeListener((button, checked) -> {
+            for (CheckBox box : vuNew) box.setEnabled(checked);
+        });
+
         final boolean adreno = isAdreno();
         final CheckBox turbo;
         {
@@ -554,7 +603,7 @@ public final class LauncherActivity extends Activity {
                 .setTitle("Settings")
                 .setView(scroll)
                 .setPositiveButton("Done", (dialog, which) -> {
-                    prefs.edit()
+                    SharedPreferences.Editor editor = prefs.edit()
                             .putBoolean(KEY_WIDESCREEN, widescreen.isChecked())
                             .putInt(KEY_SCALE, scales.getCheckedRadioButtonId() == 2 ? 2 : 1)
                             .putFloat(KEY_TOUCH_ALPHA, dim.isChecked() ? 0.55f : 0.86f)
@@ -562,7 +611,10 @@ public final class LauncherActivity extends Activity {
                             .putBoolean(KEY_FPS30, fps30.isChecked() && !safe.isChecked())
                             .putBoolean(KEY_TURBO, turbo != null && turbo.isChecked() && !safe.isChecked())
                             .putBoolean(KEY_SAFE, safe.isChecked())
-                            .apply();
+                            .putBoolean(KEY_VU_AOT, vuAot.isChecked());
+                    for (int i = 0; i < vuNew.length; ++i)
+                        editor.putBoolean(KEY_VU_NEW + VU_NEW[i], vuNew[i].isChecked());
+                    editor.apply();
                     refresh();
                 })
                 .setNegativeButton("Cancel", null)

@@ -35,6 +35,14 @@ public final class GameActivity extends SDLActivity {
         SharedPreferences prefs = getSharedPreferences(LauncherActivity.PREFS, MODE_PRIVATE);
         int scale = prefs.getInt(LauncherActivity.KEY_SCALE, 1);
         boolean safe = prefs.getBoolean(LauncherActivity.KEY_SAFE, false);
+        boolean vuAot = prefs.getBoolean(LauncherActivity.KEY_VU_AOT, true);
+        StringBuilder vuSkip = new StringBuilder();
+        for (String hash : LauncherActivity.VU_NEW) {
+            if (!prefs.getBoolean(LauncherActivity.KEY_VU_NEW + hash, false)) {
+                if (vuSkip.length() > 0) vuSkip.append(',');
+                vuSkip.append(hash);
+            }
+        }
         try {
             // Read by the WebGPU renderer when it creates its device.
             Os.setenv("PS2_SCALE", String.valueOf(scale == 2 ? 2 : 1), true);
@@ -46,12 +54,18 @@ public final class GameActivity extends SDLActivity {
             // Optional half-rate cadence for phones that cannot hold 60 fps.
             Os.setenv("PS2_FPS_CADENCE",
                     !safe && prefs.getBoolean(LauncherActivity.KEY_FPS30, false) ? "30" : "60", true);
+            // VU1 AOT controls: the five programs added in 2.0 stay on the
+            // interpreter unless the user enables them one by one.
+            Os.setenv("PS2_VU_AOT", vuAot ? "1" : "0", true);
+            Os.setenv("PS2_VU_SKIP", vuAot ? vuSkip.toString() : "", true);
         } catch (Exception ignored) {
         }
         LogFile.append(this, "[app] game start: iso=" + sIsoSize + " bytes, scale=" + scale
                 + ", safe=" + safe
                 + ", drs=" + prefs.getBoolean(LauncherActivity.KEY_DRS, false)
                 + ", fps30=" + prefs.getBoolean(LauncherActivity.KEY_FPS30, false)
+                + ", vu_aot=" + vuAot
+                + ", vu_skip=" + (vuAot ? vuSkip : "all")
                 + ", custom_driver=" + (prefs.getString(LauncherActivity.KEY_DRIVER_PATH, null) != null));
         super.onCreate(savedInstanceState);
         float alpha = getSharedPreferences(LauncherActivity.PREFS, MODE_PRIVATE)

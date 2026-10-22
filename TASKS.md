@@ -1,6 +1,31 @@
-# TASKS — v2.2 "UI & Logs" (all Vulkan vendors)
+# TASKS - v2.3 "VU1 AOT hotfix" (all Vulkan vendors)
 
 > Execution tracker. Updated as work lands. Statuses: `[ ]` todo, `[~]` in progress, `[x]` done, `[!]` blocked on hardware.
+
+## Crash evidence (2026-10-22, binary diff of the APKs)
+
+The v2.0/v2.1/v2.2 crash is now tied to the only **game-code** change between
+the working v1.x builds and the crashing v2.x builds:
+
+| APK | VU1 AOT programs in `libmain.so` |
+| --- | --- |
+| v1.0.0 (works) | 112 |
+| v1.1.0 (works) | 112 |
+| v2.0.0-v2.2.0 (crash) | 117 |
+
+The five programs added in v2.0 are:
+
+```
+4176D02B93877C36  54781DABBA793231  758DC1364D0BF01B
+E344F110E1EBEEDC  EF764AF45D6D7189
+```
+
+v2.0 shipped a larger table ("117 from 86 recorded blocks"). A miscompiled AOT
+program crashes only when the game executes it; v1.x used the interpreter for
+those five, so the same scenes were safe. v2.3 therefore **skips the five by
+default** and exposes a per-program diagnostic switch in Settings. The exact
+offending program still needs a device test (no phone attached to this build
+machine).
 
 ## Status snapshot (2026-10-22, fourth pass — v2.2)
 - Android APK builds: **yes** — `dist/gow2-debug.apk`, versionCode 5 /
@@ -66,7 +91,12 @@
 - [x] Adreno-only gating; Mali/other vendors keep stock driver path (never load turnip)
 - [x] `scripts/fetch-turnip.ps1` with a pinned release + SHA256 check (`v26.0.0-rc08`, `Turnip_v26.0.0_R8.zip`). The revision is pinned but **not hardware-tested**; the script prints that warning.
 
-## Fase 3 — Backend Vulkan raw + jalur graphics (engine native baru)
+## Fase 3 - Backend Vulkan raw + jalur graphics (engine native baru)
+
+> Research, repo/license matrix and the Tier 1 phase plan are in
+> [`docs/RENDERER-MIGRATION.md`](docs/RENDERER-MIGRATION.md). Nothing below is
+> implemented yet; wgpu remains the renderer.
+
 - [ ] Backend abstraction over `gs::gpu` (wgpu | raw Vulkan), wgpu stays default on desktop/web
 - [ ] Raw Vulkan context: instance/device/queue/ANativeWindow surface/swapchain/FIFO/letterbox
 - [ ] Persistent-mapped host-visible buffers (VRAM/CLUT/arena/params) — no per-frame queue writes
@@ -102,7 +132,18 @@
 - [!] Frame-time plots (Perfetto) on Adreno 6xx-class target
 - [!] Mali device smoke test (stock driver, no turnip)
 
-## Findings — 989SND bank layout (retail USA ISO)
+## Fase 7 - Crash v2.0-v2.2: VU1 AOT bisect
+
+- [x] Binary evidence: v1.x = 112 programs, v2.x = 117; five new hashes isolated
+- [x] Runtime filter `PS2_VU_AOT=0` (all-interpreter) and `PS2_VU_SKIP=<hashes>` in `runtime/src/vu_micro.cpp`
+- [x] Android defaults: five new programs skipped; saver settings checkbox `Compiled VU1 microcode (AOT)` plus one toggle per program
+- [x] `[app] game start: ... vu_aot=... vu_skip=...` written to `/sdcard/gow2/log.txt`
+- [ ] **Device confirmation**: install v2.3, boot, then enable one program at a time from Settings; record the hash that crashes
+- [ ] Fix `vurecomp`/codegen for the offending program (or keep it on the interpreter permanently; cost is small)
+- [ ] Long headless run (3,500+ frames) with all five enabled under ASan/UBSan
+- [ ] If v2.3 still crashes with all five skipped, bisect the v2.0 engine changes: read-ahead, SBP scanner, affinity, ThinLTO/ICF, adrenotools
+
+## Findings - 989SND bank layout (retail USA ISO)
 - `GODOFWAR.TOC` has no `.BNK` entries. SMPD contains an override loader that
   can build `host1:sound/<bank>.bnk`, but normal bank loads use the named
   `SBP_*` resource path instead. The SIF trace shows the EE sending

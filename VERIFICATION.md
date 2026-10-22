@@ -7,6 +7,23 @@ end to end and which parts have not.
 Date: 2026-10-22. Host: Windows 11, LLVM/Clang, Ninja, Python 3, JDK 17,
 Android SDK platform 35, NDK 27.3.13750724, CMake 3.30.5.
 
+## v2.3 - VU1 AOT crash evidence (2026-10-22, APK v2.3)
+
+- **Binary comparison.** v1.0.0 and v1.1.0 `libmain.so` contain 112 of the 117
+  VU1 program hashes in the current generated table; v2.0.0-v2.2.0 contain all
+  117. The five additions are `4176D02B93877C36`, `54781DABBA793231`,
+  `758DC1364D0BF01B`, `E344F110E1EBEEDC`, `EF764AF45D6D7189`.
+- **Runtime filter.** `runtime/src/vu_micro.cpp` now reads `PS2_VU_AOT` and
+  `PS2_VU_SKIP`; the native runner was rebuilt and produced
+  `[vu] AOT programs registered: 117/117` by default, `112/117` with the five
+  hashes skipped, and `[vu] AOT disabled` with `PS2_VU_AOT=0`.
+- **APK v2.3.** versionCode 6 / versionName 2.3, 13,192,938 bytes, SHA-256
+  `B612E1BA300053041C08358E6C9ECE04384296A5F12D9BEE61C3EF65AFBF577F`.
+  `PS2_VU_AOT`/`PS2_VU_SKIP` strings are present, `dlopen`/`dlclose` stay
+  undefined imports, and all `LOAD` segments are 16 KB aligned.
+- **Not verified:** whether the five-program skip fixes the phone boot. That
+  needs the device log; the default settings already skip the five.
+
 ## Passed
 
 - **Disc image.** The USA DVD9 image reports `SCUS_974.81;1`, `VER = 1.01`,

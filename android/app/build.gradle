@@ -11,8 +11,8 @@ android {
         applicationId "com.gow2.android"
         minSdk 26
         targetSdk 35
-        versionCode 5
-        versionName "2.2"
+        versionCode 6
+        versionName "2.3"
         externalNativeBuild {
             cmake {
                 arguments "-DANDROID_STL=c++_static", "-DANDROID_PLATFORM=android-26",
