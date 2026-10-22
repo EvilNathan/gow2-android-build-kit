@@ -2,7 +2,10 @@ param(
     [string]$Iso = "",
     [int]$Frames = 2400,
     [int]$ExploreRounds = 3,
-    [switch]$SkipExplore
+    [switch]$SkipExplore,
+    # Reuse a recorded VU capture instead of replaying the game for ~20 minutes
+    # per round. Point this at a folder of *.bin records from an earlier run.
+    [string]$VuCache = ""
 )
 
 . (Join-Path $PSScriptRoot "common.ps1")
@@ -99,19 +102,39 @@ if ($SkipExplore) {
     return
 }
 
-$runner = Build-Native
 $vuDir = Join-Path $Game "vu1"
 $shots = Join-Path $Game "shots"
 $missesPath = Join-Path $Game "misses.txt"
 $memcard = Join-Path $Game "explore.ps2"
-Remove-Item $vuDir -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory $vuDir | Out-Null
-New-Item -ItemType Directory $shots -Force | Out-Null
 
 $press = @()
 for ($f = 300; $f -lt $Frames; $f += 300) {
     $button = if ((($f / 300) % 2) -eq 1) { "start" } else { "cross" }
     $press += @("--press", "${f}:${button}:8")
+}
+
+$usingCache = $false
+if ($VuCache) {
+    $cachePath = (Resolve-Path $VuCache).Path
+    $cached = @(Get-ChildItem $cachePath -Filter "*.bin" -ErrorAction SilentlyContinue)
+    if ($cached.Count -eq 0) { throw "No VU records in $cachePath. Point -VuCache at a recorded vu1 folder." }
+    $usingCache = $true
+    $ExploreRounds = 0
+    if ($cachePath -ne $vuDir) {
+        Remove-Item $vuDir -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory $vuDir -Force | Out-Null
+        Write-Step "Restoring $($cached.Count) recorded VU programs from $cachePath"
+        Copy-Item (Join-Path $cachePath "*.bin") $vuDir -Force
+    } else {
+        Write-Step "Reusing the $($cached.Count) recorded VU programs already in $vuDir"
+    }
+}
+if (-not $usingCache) {
+    # The runner is only needed for the replay; a cache skips straight to vurecomp.
+    $runner = Build-Native
+    Remove-Item $vuDir -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory $vuDir | Out-Null
+    New-Item -ItemType Directory $shots -Force | Out-Null
 }
 
 for ($round = 1; $round -le $ExploreRounds; $round++) {
@@ -149,6 +172,9 @@ for ($round = 1; $round -le $ExploreRounds; $round++) {
 $recorded = @(Get-ChildItem $vuDir -Filter "*.bin" -ErrorAction SilentlyContinue)
 if ($recorded.Count -gt 0) {
     Write-Step "Compiling $($recorded.Count) recorded VU programs"
+    if (-not $VuCache) {
+        Write-Host "Tip: pass -VuCache '$vuDir' next time to skip the exploration replay."
+    }
     Remove-Item (Join-Path $Generated "vu1_*.cpp") -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $Generated "vu1_table.cpp") -Force -ErrorAction SilentlyContinue
     Invoke-Checked $vurecomp @($vuDir, $Generated)

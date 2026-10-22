@@ -170,6 +170,31 @@ app's private files directory.
 Missing VU programs are interpreted at runtime; the game is correct but slower.
 Increase `-Frames` to capture more VU programs and more of the intro.
 
+### Faster rebuilds
+
+The expensive step is the VU exploration: it replays the game in the software
+GS for `-Frames` frames (~20 minutes for the default 2,400), once per round.
+Keep the recording and reuse it instead of replaying:
+
+```powershell
+# First run records games\gow2\vu1\*.bin as usual.
+.\scripts\recompile.ps1 -Iso "D:\Games\God of War II (USA).iso"
+
+# Later builds reuse the recording; no replay, no ISO reads.
+.\scripts\recompile.ps1 -VuCache .\games\gow2\vu1
+.\scripts\build-android.ps1
+```
+
+`-VuCache` accepts any folder of `*.bin` VU records, including a copy kept
+outside `games\`, which the kit's `.gitignore` excludes. The rest of the
+pipeline is already incremental: `setup.ps1` skips a checkout that is at the
+pinned commit, `build-tools.ps1` and the native CMake build reuse their build
+trees, and Gradle reuses `android\app\.cxx` and `android\app\build`.
+
+Everything game-derived — `generated\`, `games\`, and the APK — stays local.
+The kit ships none of it, so a fresh clone still has to translate the disc
+once.
+
 ## Project layout
 
 ```
