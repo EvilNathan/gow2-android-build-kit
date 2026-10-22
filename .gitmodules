@@ -1,0 +1,3 @@
+[submodule "engine"]
+	path = engine
+	url = https://github.com/snuri00/ps2-web-recomp.git

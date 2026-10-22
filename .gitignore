@@ -13,6 +13,8 @@ dist/
 android/.gradle/
 android/local.properties
 android/app/build/
+android/build/
+android/app/.cxx/
 android/.cxx/
 android/captures/
 .android/

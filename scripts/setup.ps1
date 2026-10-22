@@ -19,7 +19,15 @@ if (-not (Test-Path (Join-Path $Engine ".git"))) {
     if (Test-Path $Engine) {
         throw "$Engine exists but is not a git checkout. Move it aside and rerun."
     }
-    Invoke-Checked git @("clone", "--depth", "1", $engineRepo, $Engine)
+    # The kit tracks the engine as a submodule pinned to $pin. A plain clone is
+    # the fallback for older checkouts that predate .gitmodules.
+    $gitlink = & git -C $Root ls-files --stage -- engine 2>$null
+    if ($LASTEXITCODE -eq 0 -and $gitlink -match "^160000") {
+        Write-Host "Initializing the engine submodule."
+        Invoke-Checked git @("-C", $Root, "submodule", "update", "--init", "engine")
+    } else {
+        Invoke-Checked git @("clone", "--depth", "1", $engineRepo, $Engine)
+    }
 }
 $head = (& git -C $Engine rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw "Cannot read the engine revision." }
