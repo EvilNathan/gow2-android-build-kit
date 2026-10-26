@@ -1,0 +1,28 @@
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 0dc9480..243a3fc 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -323,7 +323,11 @@ namespace
+ 
+ 
+ GS::GS()
++#if defined(PS2X_FORCE_NULL_GS)
++    : m_backend(std::make_unique<GSNullBackend>())
++#else
+     : m_backend(GSThreadedBackend::MakeDefault())
++#endif
+ {
+     reset();
+ }
+@@ -334,7 +338,11 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
+     m_localMemorySize = vramSize;
+     m_privRegs = privRegs;
+     if (!m_backend)
++#if defined(PS2X_FORCE_NULL_GS)
++        m_backend = std::make_unique<GSNullBackend>();
++#else
+         m_backend = GSThreadedBackend::MakeDefault();
++#endif
+     m_backend->Initialize(vram, vramSize);
+     reset();
+ }

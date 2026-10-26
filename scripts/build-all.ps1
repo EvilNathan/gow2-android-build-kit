@@ -1,37 +1,25 @@
 param(
-    [Parameter(Mandatory = $true)][string]$Iso,
-    [int]$Frames = 2400,
-    [switch]$SkipExplore,
-    [switch]$ForceDeps,
-    # Reuse a previous VU recording instead of replaying the game.
-    [string]$VuCache = "",
-    [ValidateSet("", "quick", "standard", "full")]
-    [string]$Preset = ""
+    [Parameter(Mandatory)][string]$Iso,
+    [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
+    [switch]$SkipTools,
+    [switch]$SkipDesktopRun,
+    [switch]$SkipAndroid,
+    [switch]$Install,
+    [switch]$PushData
 )
 
-. (Join-Path $PSScriptRoot "common.ps1")
+. (Join-Path $PSScriptRoot '_common.ps1')
 
-$isoPath = Get-IsoPath $Iso
+& (Join-Path $PSScriptRoot 'setup.ps1')
+if (-not $SkipTools) { & (Join-Path $PSScriptRoot 'build-tools.ps1') }
+& (Join-Path $PSScriptRoot 'extract-disc.ps1') -Iso $Iso
+& (Join-Path $PSScriptRoot 'recompile.ps1')
 
-Write-Step "1/5 Engine and dependencies"
-& (Join-Path $PSScriptRoot "setup.ps1") -ForceDeps:$ForceDeps
+if (-not $SkipDesktopRun) {
+    & (Join-Path $PSScriptRoot 'run-headless.ps1') -Seconds 20 -Build
+}
 
-
-Write-Step "2/5 Disc extraction"
-& (Join-Path $PSScriptRoot "extract-disc.ps1") -Iso $isoPath
-
-
-Write-Step "3/5 Recompiler tools"
-& (Join-Path $PSScriptRoot "build-tools.ps1")
-
-
-Write-Step "4/5 Game code and VU programs"
-& (Join-Path $PSScriptRoot "recompile.ps1") -Iso $isoPath -Frames $Frames -SkipExplore:$SkipExplore -VuCache $VuCache -Preset $Preset
-
-
-Write-Step "5/5 Android APK"
-& (Join-Path $PSScriptRoot "build-android.ps1")
-
-
-Write-Host ""
-Write-Host "Build complete." -ForegroundColor Green
+if (-not $SkipAndroid) {
+    & (Join-Path $PSScriptRoot 'build-android.ps1') -Configuration $Configuration -Install:$Install
+    if ($PushData) { & (Join-Path $PSScriptRoot 'push-game-data.ps1') }
+}

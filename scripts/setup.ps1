@@ -1,142 +1,49 @@
 param(
-    [switch]$ForceDeps
+    [switch]$ForceEngine
 )
 
-. (Join-Path $PSScriptRoot "common.ps1")
+. (Join-Path $PSScriptRoot '_common.ps1')
 
-$pin = "6526f4803d98e10de50bea3af104a4d26e9df033"
-$engineRepo = "https://github.com/snuri00/ps2-web-recomp.git"
-$adrenotoolsPin = "8fae8ce254dfc1344527e05301e43f37dea2df80"
-$patch = Join-Path $Root "engine.patch"
+Write-Step 'Checking prerequisites'
+Require-Command git 'Install Git for Windows and restart the shell.' | Out-Null
+Require-Command cmake 'Install CMake 3.24 or newer.' | Out-Null
+$py = Get-Command python -ErrorAction SilentlyContinue
+$py = if ($py) { $py.Source } else { (Require-Command py 'Install Python 3 (python or py launcher).') }
 
-Write-Step "Checking prerequisites"
-Require-Command git "Install Git for Windows and restart the shell." | Out-Null
-Require-Command cmake "Install CMake 3.24 or newer." | Out-Null
-Require-Command ninja "Install Ninja, or use a Visual Studio Developer PowerShell." | Out-Null
-Get-Python | Out-Null
-
-Write-Step "Engine"
-if (-not (Test-Path (Join-Path $Engine ".git"))) {
-    if (Test-Path $Engine) {
-        throw "$Engine exists but is not a git checkout. Move it aside and rerun."
-    }
-    # The kit tracks the engine as a submodule pinned to $pin. A plain clone is
-    # the fallback for older checkouts that predate .gitmodules.
-    $gitlink = & git -C $Root ls-files --stage -- engine 2>$null
-    if ($LASTEXITCODE -eq 0 -and $gitlink -match "^160000") {
-        Write-Host "Initializing the engine submodule."
-        Invoke-Checked git @("-C", $Root, "submodule", "update", "--init", "engine")
-    } else {
-        Invoke-Checked git @("clone", "--depth", "1", $engineRepo, $Engine)
-    }
+if (-not (Test-Path (Join-Path $RepoRoot '.git'))) {
+    throw 'setup.ps1 must run inside the kit git checkout.'
 }
-$head = (& git -C $Engine rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0) { throw "Cannot read the engine revision." }
-if ($head -ne $pin) {
-    Write-Host "Engine is at $head; checking out $pin."
-    & git -C $Engine cat-file -e "$pin^{commit}" 2>$null
+
+if ($ForceEngine -and (Test-Path $RecompDir)) {
+    Write-Step 'Removing the engine checkout'
+    Remove-Item $RecompDir -Recurse -Force
+}
+
+Write-Step 'Engine submodule (PS2Recomp)'
+if (-not (Test-Path (Join-Path $RecompDir '.git'))) {
+    if (Test-Path $RecompDir) { Remove-Item $RecompDir -Recurse -Force }
+    Invoke-Native git @('-C', $RepoRoot, 'submodule', 'update', '--init', '--recursive')
+}
+if (-not (Test-Path (Join-Path $RecompDir '.git'))) {
+    throw "Could not initialize $RecompDir. Check network access to github.com."
+}
+
+$head = (& git -C $RecompDir rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Cannot read the PS2Recomp revision.' }
+if ($head -ne $EnginePin) {
+    Write-Host "PS2Recomp is at $head; checking out $EnginePin."
+    & git -C $RecompDir cat-file -e "$EnginePin^{commit}" 2>$null
     if ($LASTEXITCODE -ne 0) {
-        & git -C $Engine fetch --depth 1 origin $pin
+        & git -C $RecompDir fetch origin $EnginePin
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "Fetching the full engine history for the pinned revision."
-            Invoke-Checked git @("-C", $Engine, "fetch", "origin")
+            Invoke-Native git @('-C', $RecompDir, 'fetch', 'origin')
         }
     }
-    Invoke-Checked git @("-C", $Engine, "checkout", "--quiet", $pin)
+    Invoke-Native git @('-C', $RecompDir, 'checkout', '--quiet', $EnginePin)
 }
 
-$patchApplied = $false
-& git -C $Engine apply --check --ignore-whitespace $patch 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Invoke-Checked git @("-C", $Engine, "apply", "--ignore-whitespace", $patch)
-} else {
-    # The forward check fails when the patch is already applied. Verify that
-    # the current tree is exactly the patched state before assuming that.
-    & git -C $Engine apply --reverse --check --ignore-whitespace $patch 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        throw "engine.patch does not apply to this engine checkout and the tree is not already patched. Delete engine\ and rerun."
-    }
-    $patchApplied = $true
-}
-if ($patchApplied) {
-    Write-Host "GoW2 Android patch already applied."
-}
+Apply-EnginePatches
 
-$thirdParty = Join-Path $Engine "third_party"
-New-Item -ItemType Directory $thirdParty -Force | Out-Null
-
-function Get-Zip {
-    param([string]$Url, [string]$Destination)
-    Write-Host "Downloading $Url"
-    Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing
-}
-
-Write-Step "SDL3 3.4.18"
-$sdl = Join-Path $thirdParty "SDL3-3.4.18"
-if ($ForceDeps) { Remove-Item $sdl -Recurse -Force -ErrorAction SilentlyContinue }
-if (-not (Test-Path (Join-Path $sdl "CMakeLists.txt"))) {
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("gow2-sdl-" + [guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory $tmp | Out-Null
-    try {
-        $zip = Join-Path $tmp "SDL3.zip"
-        Get-Zip "https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-3.4.18.zip" $zip
-        Expand-Archive -Path $zip -DestinationPath $tmp -Force
-        $source = Get-ChildItem $tmp -Directory |
-            Where-Object { Test-Path (Join-Path $_.FullName "CMakeLists.txt") } |
-            Select-Object -First 1
-        if (-not $source) { throw "The SDL3 archive did not contain a source tree." }
-        Move-Item $source.FullName $sdl
-    } finally {
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    }
-} else {
-    Write-Host "SDL3 sources present."
-}
-
-Write-Step "wgpu-native v29.0.1.1 (Android arm64)"
-$wgpu = Join-Path $thirdParty "wgpu-native-android"
-if ($ForceDeps) { Remove-Item $wgpu -Recurse -Force -ErrorAction SilentlyContinue }
-if (-not (Test-Path (Join-Path $wgpu "lib\libwgpu_native.a"))) {
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("gow2-wgpu-" + [guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory $tmp | Out-Null
-    try {
-        $zip = Join-Path $tmp "wgpu.zip"
-        Get-Zip "https://github.com/gfx-rs/wgpu-native/releases/download/v29.0.1.1/wgpu-android-aarch64-release.zip" $zip
-        Expand-Archive -Path $zip -DestinationPath $tmp -Force
-        $library = Get-ChildItem $tmp -Recurse -File -Filter "libwgpu_native.a" | Select-Object -First 1
-        if (-not $library) { throw "The wgpu-native archive did not contain libwgpu_native.a." }
-        # The archive normally has include/, lib/, and wgpu-native-meta/ below one folder.
-        $root = $library.Directory.Parent
-        Move-Item $root.FullName $wgpu
-    } finally {
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    }
-} else {
-    Write-Host "wgpu-native Android library present."
-}
-
-Write-Step "libadrenotools (Adreno driver replacement)"
-$adreno = Join-Path $thirdParty "libadrenotools"
-if ($ForceDeps) { Remove-Item $adreno -Recurse -Force -ErrorAction SilentlyContinue }
-if (-not (Test-Path (Join-Path $adreno "CMakeLists.txt"))) {
-    if (Test-Path $adreno) { Remove-Item $adreno -Recurse -Force }
-    Invoke-Checked git @("clone", "--depth", "1", "--recurse-submodules", "--shallow-submodules",
-        "https://github.com/bylaws/libadrenotools.git", $adreno)
-}
-if (Test-Path (Join-Path $adreno ".git")) {
-    $adrenoHead = (& git -C $adreno rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -eq 0 -and $adrenoHead -ne $adrenotoolsPin) {
-        & git -C $adreno fetch --depth 1 origin $adrenotoolsPin
-        if ($LASTEXITCODE -eq 0) { & git -C $adreno checkout --quiet $adrenotoolsPin }
-    }
-    Invoke-Checked git @("-C", $adreno, "submodule", "update", "--init", "--depth", "1")
-}
-if (-not (Test-Path (Join-Path $adreno "lib\linkernsbypass\CMakeLists.txt"))) {
-    throw "libadrenotools is incomplete (linkernsbypass submodule missing). Delete engine\third_party\libadrenotools and rerun."
-}
-
-Write-Step "Done"
-Write-Host "Engine:  $Engine"
-Write-Host "SDL3:    $sdl"
-Write-Host "wgpu:    $wgpu"
-Write-Host "adreno:  $adreno"
+Write-Step 'Done'
+Write-Host "Engine:  $RecompDir ($EnginePin)"
+Write-Host 'Next:    .\scripts\extract-disc.ps1 -Iso "<your God of War II (USA).iso>"'

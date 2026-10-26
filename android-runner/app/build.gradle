@@ -1,0 +1,64 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Files pushed by scripts/install-android-tools.ps1 / build-android.ps1.
+def ps2xBootElfName = project.findProperty('ps2xBootElfName') ?: 'SCUS_974.81'
+def ps2xNullGs = (project.findProperty('ps2xNullGs') ?: 'ON').toString().toUpperCase()
+def appId = 'com.gow2.android'
+def filesDir = "/storage/emulated/0/Android/data/${appId}/files"
+
+android {
+    namespace 'com.gow2.android'
+    compileSdk 35
+    ndkVersion '27.3.13750724'
+
+    defaultConfig {
+        applicationId appId
+        minSdk 28
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+
+        externalNativeBuild {
+            cmake {
+                arguments '-DPS2X_BUILD_RECOMP=OFF',
+                        '-DPS2X_BUILD_ANALYZER=OFF',
+                        '-DPS2X_BUILD_TEST=OFF',
+                        '-DPS2X_BUILD_STUDIO=OFF',
+                        '-DPS2X_ENABLE_SCCACHE=OFF',
+                        '-DPS2X_ENABLE_DEBUG_UI=OFF',
+                        '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=32',
+                        '-DANDROID_CPP_FEATURES=rtti exceptions',
+                        "-DPS2X_DEFAULT_BOOT_ELF=${filesDir}/${ps2xBootElfName}",
+                        "-DPS2X_FORCE_NULL_GS=${ps2xNullGs}"
+                targets 'ps2EntryRunner'
+            }
+        }
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path '../native/CMakeLists.txt'
+            version '3.31.5'
+        }
+    }
+
+    buildTypes {
+        debug {
+            externalNativeBuild {
+                cmake {
+                    arguments '-DCMAKE_BUILD_TYPE=RelWithDebInfo'
+                }
+            }
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+}

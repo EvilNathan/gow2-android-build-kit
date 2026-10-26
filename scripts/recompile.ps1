@@ -1,216 +1,141 @@
+﻿<#
+.SYNOPSIS
+    Translates the game ELF to C++ and syncs generated code + overrides into the PS2Recomp runner.
+
+.PARAMETER SyncOnly
+    Do not recompile: only re-copy generated/ and overrides/ into the runner (after editing an override).
+
+.PARAMETER AggressiveLogs
+    Reconfigure CMake with AGRESSIVE_LOGS (off by default; costs ~11% of the game's time).
+
+.NOTES
+    Optional native speed-ups from the reference project (captured on a PC with a GL 4.5 GPU):
+      $env:GOW_VU1_MICROCODIGO = folder with the VU1 microcode capture
+      $env:GOW_IOP_MODULOS     = folder with modules.txt from PS2X_IOP_DUMP_MODULES
+    Both are game-derived and stay local. VU1 native is disabled for Android for now (SSE generator).
+#>
 param(
-    [string]$Iso = "",
-    [int]$Frames = 2400,
-    [int]$ExploreRounds = 3,
-    [switch]$SkipExplore,
-    # Reuse a recorded VU capture instead of replaying the game for ~20 minutes
-    # per round. Point this at a folder of *.bin records from an earlier run.
-    [string]$VuCache = "",
-    # Named capture budget: quick (no replay), standard (2400 frames), full (4200).
-    [ValidateSet("", "quick", "standard", "full")]
-    [string]$Preset = ""
+    [switch]$SyncOnly,
+    [switch]$AggressiveLogs
 )
 
-. (Join-Path $PSScriptRoot "common.ps1")
+. (Join-Path $PSScriptRoot '_common.ps1')
 
-if ($Preset) {
-    $framesGiven = $PSBoundParameters.ContainsKey("Frames")
-    $roundsGiven = $PSBoundParameters.ContainsKey("ExploreRounds")
-    switch ($Preset) {
-        "quick" { if (-not $framesGiven) { $Frames = 0 }; $SkipExplore = $true }
-        "standard" {
-            if (-not $framesGiven) { $Frames = 2400 }
-            if (-not $roundsGiven) { $ExploreRounds = 3 }
-        }
-        "full" {
-            if (-not $framesGiven) { $Frames = 4200 }
-            if (-not $roundsGiven) { $ExploreRounds = 5 }
-        }
-    }
-    if ($Preset -eq "quick") {
-        Write-Host "Preset quick: no VU replay; missing programs are interpreted."
-    } else {
-        Write-Host "Preset ${Preset}: $Frames frames, up to $ExploreRounds round(s)."
-    }
+$elfPath = Get-GameElfPath
+function ConvertTo-ForwardSlash([string]$Path) { return $Path -replace '\\', '/' }
+
+if (-not $SyncOnly) {
+    $recomp = Join-Path $BuildDir 'ps2xRecomp\Release\ps2_recomp.exe'
+    if (-not (Test-Path $recomp)) { throw 'ps2_recomp.exe is missing. Run .\scripts\build-tools.ps1 first.' }
+    if ("$RepoRoot" -match '[^\x00-\x7F]') { throw "The repository path contains non-ASCII characters: $RepoRoot" }
+
+    Write-Step 'Recompiling the ELF'
+    $toml = [IO.File]::ReadAllText($TemplateToml)
+    $toml = $toml.Replace('@ELF@', (ConvertTo-ForwardSlash $elfPath)).
+                  Replace('@MAP@', (ConvertTo-ForwardSlash $FuncMapCsv)).
+                  Replace('@OUT@', (ConvertTo-ForwardSlash $GeneratedDir) + '/')
+    New-Item -ItemType Directory -Force (Split-Path $EffectiveToml) | Out-Null
+    Write-Utf8NoBom $EffectiveToml $toml
+
+    if (Test-Path $GeneratedDir) { Remove-Item $GeneratedDir -Recurse -Force }
+    New-Item -ItemType Directory -Force $GeneratedDir | Out-Null
+
+    Push-Location $RepoRoot
+    try { Invoke-Native $recomp @($EffectiveToml) }
+    finally { Pop-Location }
+
+    $units = @(Get-ChildItem $GeneratedDir -File -Filter '*.cpp')
+    Write-Host "Generated $($units.Count) C++ units in $GeneratedDir"
 }
 
-$isoPath = Get-IsoPath $Iso
-$eerecomp = Get-Tool "eerecomp"
-$vurecomp = Get-Tool "vurecomp"
-$elf = Join-Path $Disc "SCUS_974.81"
-if (-not (Test-Path $elf)) {
-    throw "Missing $elf. Run scripts\extract-disc.ps1 -Iso '$isoPath' first."
-}
-
-New-Item -ItemType Directory $Generated -Force | Out-Null
-New-Item -ItemType Directory $Game -Force | Out-Null
-$entries = Join-Path $Game "entries.txt"
-if (-not (Test-Path $entries)) { New-Item -ItemType File $entries | Out-Null }
-
-function Invoke-Translate {
-    Write-Step "Translating Emotion Engine code"
-    Invoke-Checked $eerecomp @($elf, "--entries", $entries, "--out", $Generated)
-    $units = @(Get-ChildItem $Generated -Filter "unit_*.cpp" -ErrorAction SilentlyContinue)
-    if ($units.Count -eq 0) { throw "eerecomp produced no generated units in $Generated." }
-    Write-Host "Generated $($units.Count) C++ units."
-}
-
-function Add-MissedEntries {
-    param([string]$Misses)
-    if (-not (Test-Path $Misses)) { return 0 }
-    $known = @{}
-    foreach ($line in Get-Content $entries -ErrorAction SilentlyContinue) {
-        foreach ($token in ($line -split "\s+")) {
-            if ($token) { $known[$token.ToLowerInvariant()] = $true }
-        }
+# ── Native IOP modules (optional) ─────────────────────────────────────────
+$iopNativeDir = Join-Path $RecompDir 'ps2xIOP\src\native'
+if ($env:GOW_IOP_MODULOS) {
+    if (-not (Test-Path (Join-Path $env:GOW_IOP_MODULOS 'modules.txt'))) { throw "GOW_IOP_MODULOS has no modules.txt: $env:GOW_IOP_MODULOS" }
+    Write-Step 'Native IOP modules'
+    $iopTemp = Join-Path $BuildDir 'iopn-gen'
+    if (Test-Path $iopTemp) { Remove-Item $iopTemp -Recurse -Force }
+    New-Item -ItemType Directory -Force $iopTemp | Out-Null
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    $pyExe = if ($py) { $py.Source } else { (Require-Command py) }
+    Invoke-Native $pyExe @('-I', (Join-Path $RepoRoot 'tools\iop\iopn_gen.py'), $env:GOW_IOP_MODULOS, $iopTemp)
+    $fresh = @(Get-ChildItem $iopTemp -Filter 'iopn_*.cpp' -File)
+    $freshNames = $fresh | ForEach-Object Name
+    Get-ChildItem $iopNativeDir -Filter 'iopn_*.cpp' -File -ErrorAction SilentlyContinue |
+        Where-Object { $freshNames -notcontains $_.Name } | Remove-Item -Force
+    $iopCopied = 0
+    foreach ($file in $fresh) {
+        $dest = Join-Path $iopNativeDir $file.Name
+        if ((Test-Path $dest) -and (Get-FileHash $dest -Algorithm MD5).Hash -eq (Get-FileHash $file.FullName -Algorithm MD5).Hash) { continue }
+        Copy-Item $file.FullName $dest -Force
+        $iopCopied++
     }
-    $added = 0
-    $newLines = New-Object System.Collections.Generic.List[string]
-    foreach ($line in Get-Content $Misses -ErrorAction SilentlyContinue) {
-        foreach ($token in ($line -split "\s+")) {
-            if (-not $token) { continue }
-            $key = $token.ToLowerInvariant()
-            if (-not $known.ContainsKey($key)) {
-                $known[$key] = $true
-                $newLines.Add($token)
-                $added++
-            }
-        }
-    }
-    if ($newLines.Count -gt 0) {
-        Add-Content -Path $entries -Value $newLines -Encoding ASCII
-    }
-    return $added
-}
-
-function Write-EmptyVuTable {
-    $table = Join-Path $Generated "vu1_table.cpp"
-    Set-Content -Path $table -Value "// No VU programs were recorded; the runtime will interpret them.`nvoid register_generated_vu() {}" -Encoding ASCII
-}
-
-function Build-Native {
-    Write-Step "Building the headless native runner"
-    $cmake = Require-Command cmake
-    $build = Join-Path $Root "build\native-gow2"
-    New-Item -ItemType Directory $build -Force | Out-Null
-    $configure = @(
-        "-S", $Engine,
-        "-B", $build,
-        "-G", "Ninja",
-        "-DCMAKE_BUILD_TYPE=Release",
-        "-DPS2_GENERATED=$Generated"
-    )
-    $clang = Get-Command clang++ -ErrorAction SilentlyContinue
-    if ($clang) {
-        $configure += "-DCMAKE_C_COMPILER=clang"
-        $configure += "-DCMAKE_CXX_COMPILER=clang++"
-    }
-    $log = Join-Path $build "build.log"
-    Invoke-Checked $cmake $configure *> $log
-    Invoke-Checked $cmake @("--build", $build, "--target", "ps2run", "--parallel") *>> $log
-    $suffix = if ($env:OS -eq "Windows_NT") { ".exe" } else { "" }
-    $runner = Join-Path $build ("ps2run" + $suffix)
-    if (-not (Test-Path $runner)) {
-        Get-Content $log -Tail 40 -ErrorAction SilentlyContinue
-        throw "ps2run was not produced in $build."
-    }
-    return $runner
-}
-
-Invoke-Translate
-
-if ($SkipExplore) {
-    Write-Step "Skipping VU exploration"
-    Write-EmptyVuTable
-    Write-Host "The runtime will interpret VU programs that were not compiled."
-    return
-}
-
-$vuDir = Join-Path $Game "vu1"
-$shots = Join-Path $Game "shots"
-$missesPath = Join-Path $Game "misses.txt"
-$memcard = Join-Path $Game "explore.ps2"
-
-$press = @()
-for ($f = 300; $f -lt $Frames; $f += 300) {
-    $button = if ((($f / 300) % 2) -eq 1) { "start" } else { "cross" }
-    $press += @("--press", "${f}:${button}:8")
-}
-
-$usingCache = $false
-if ($VuCache) {
-    $cachePath = (Resolve-Path $VuCache).Path
-    $cached = @(Get-ChildItem $cachePath -Filter "*.bin" -ErrorAction SilentlyContinue)
-    if ($cached.Count -eq 0) { throw "No VU records in $cachePath. Point -VuCache at a recorded vu1 folder." }
-    $usingCache = $true
-    $ExploreRounds = 0
-    if ($cachePath -ne $vuDir) {
-        Remove-Item $vuDir -Recurse -Force -ErrorAction SilentlyContinue
-        New-Item -ItemType Directory $vuDir -Force | Out-Null
-        Write-Step "Restoring $($cached.Count) recorded VU programs from $cachePath"
-        Copy-Item (Join-Path $cachePath "*.bin") $vuDir -Force
-    } else {
-        Write-Step "Reusing the $($cached.Count) recorded VU programs already in $vuDir"
-    }
-}
-if (-not $usingCache) {
-    # The runner is only needed for the replay; a cache skips straight to vurecomp.
-    $runner = Build-Native
-    Remove-Item $vuDir -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory $vuDir | Out-Null
-    New-Item -ItemType Directory $shots -Force | Out-Null
-}
-
-for ($round = 1; $round -le $ExploreRounds; $round++) {
-    Write-Step "Exploring for VU programs (round $round/$ExploreRounds)"
-    Remove-Item $missesPath -Force -ErrorAction SilentlyContinue
-    Remove-Item $memcard -Force -ErrorAction SilentlyContinue
-    $env:PS2_VU_RECORD = $vuDir
-    $env:PS2_GPU_LOW_POWER = "1"
-    try {
-        $runArgs = @(
-            $elf,
-            "--disc", $isoPath,
-            "--misses", $missesPath,
-            "--memcard", $memcard,
-            "--frames", "$Frames",
-            "--frames-dir", $shots,
-            "--frame-every", "300"
-        ) + $press
-        & $runner @runArgs
-        $runCode = $LASTEXITCODE
-    } finally {
-        Remove-Item Env:PS2_VU_RECORD -ErrorAction SilentlyContinue
-        Remove-Item Env:PS2_GPU_LOW_POWER -ErrorAction SilentlyContinue
-    }
-    if ($runCode -ne 0) {
-        Write-Warning "Exploration exited with code $runCode. Check the log output above."
-    }
-    $added = Add-MissedEntries $missesPath
-    Write-Host "New entry points: $added"
-    if ($added -le 0) { break }
-    Invoke-Translate
-    $runner = Build-Native
-}
-
-$recorded = @(Get-ChildItem $vuDir -Filter "*.bin" -ErrorAction SilentlyContinue)
-if ($recorded.Count -gt 0) {
-    Write-Step "Compiling $($recorded.Count) recorded VU programs"
-    if (-not $VuCache) {
-        Write-Host "Tip: pass -VuCache '$vuDir' next time to skip the exploration replay."
-    }
-    Remove-Item (Join-Path $Generated "vu1_*.cpp") -Force -ErrorAction SilentlyContinue
-    Remove-Item (Join-Path $Generated "vu1_table.cpp") -Force -ErrorAction SilentlyContinue
-    Invoke-Checked $vurecomp @($vuDir, $Generated)
+    Write-Host "Native IOP: $($fresh.Count) files, $iopCopied updated."
 } else {
-    Write-Step "No VU programs were recorded"
-    Write-EmptyVuTable
-    Write-Host "The game will still run, but VU microcode will be interpreted."
+    Get-ChildItem $iopNativeDir -Filter 'iopn_*.cpp' -File -ErrorAction SilentlyContinue | Remove-Item -Force
+    Write-Host 'Native IOP modules: none (set GOW_IOP_MODULOS to enable).'
 }
 
-# Rebuild once so the final native runner uses the generated VU code too.
-Build-Native | Out-Null
+# ── Sync into the runner ──────────────────────────────────────────────────
+if (-not (Test-Path $GeneratedDir)) { throw 'generated/ is empty. Run recompile.ps1 without -SyncOnly first.' }
 
-Write-Step "Recompilation complete"
-Write-Host "Generated code: $Generated"
-Write-Host "Next: scripts\build-android.ps1"
+Write-Step 'Syncing generated code and overrides'
+New-Item -ItemType Directory -Force (Split-Path $SyncManifest) | Out-Null
+New-Item -ItemType Directory -Force $RunnerSrcDir | Out-Null
+
+$md5 = [System.Security.Cryptography.MD5]::Create()
+function Test-SameContent([string]$a, [string]$b) {
+    $fa = Get-Item -LiteralPath $a
+    $fb = Get-Item -LiteralPath $b -ErrorAction SilentlyContinue
+    if (-not $fb -or $fa.Length -ne $fb.Length) { return $false }
+    $ha = $md5.ComputeHash([IO.File]::ReadAllBytes($a))
+    $hb = $md5.ComputeHash([IO.File]::ReadAllBytes($b))
+    return [Convert]::ToBase64String($ha) -eq [Convert]::ToBase64String($hb)
+}
+
+$copied = New-Object System.Collections.Generic.List[string]
+$changed = 0
+$sources = @(Get-ChildItem $GeneratedDir -File) +
+           @(Get-ChildItem $OverridesDir -File | Where-Object { $_.Extension -in '.cpp', '.h' })
+foreach ($file in $sources) {
+    $dest = Join-Path $RunnerSrcDir $file.Name
+    if (-not (Test-SameContent $file.FullName $dest)) {
+        Copy-Item $file.FullName $dest -Force
+        (Get-Item $dest).LastWriteTime = Get-Date
+        $changed++
+    }
+    $copied.Add($dest)
+}
+$removed = 0
+if (Test-Path $SyncManifest) {
+    $current = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($path in $copied) { [void]$current.Add($path) }
+    foreach ($old in (Get-Content $SyncManifest)) {
+        if ($old -and -not $current.Contains($old) -and (Test-Path -LiteralPath $old)) {
+            Remove-Item -LiteralPath $old -Force
+            $removed++
+        }
+    }
+}
+Set-Content -Path $SyncManifest -Value $copied -Encoding utf8
+Write-Host "Runner: $($copied.Count) files, $changed updated, $removed removed."
+
+# ── Reconfigure CMake so new files are part of the project ────────────────
+$cmake = Get-CMake
+$cmakeArgs = @('-S', $RecompDir, '-B', $BuildDir) + (Get-VsGeneratorArgs)
+$cmakeArgs += '-DPS2X_BUILD_TEST=OFF', '-DPS2X_BUILD_STUDIO=OFF'
+if ($AggressiveLogs) { $cmakeArgs += '-DPS2X_ENABLE_AGRESSIVE_LOGS=ON' }
+else { $cmakeArgs += '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF' }
+$vu1Micro = if ($env:GOW_VU1_MICROCODIGO) { ConvertTo-ForwardSlash $env:GOW_VU1_MICROCODIGO } else { '' }
+if ($vu1Micro) { Write-Host "Native VU1 from $vu1Micro" }
+$cmakeArgs += "-DPS2X_VU1_MICROCODE_DIR=$vu1Micro"
+$cmakeArgs += "-DPS2X_VU1_GENERATOR_SOURCE=$(if ($vu1Micro) { ConvertTo-ForwardSlash (Join-Path $RepoRoot 'tools\vu1\generar_vu1.cpp') })"
+$cmakeArgs += "-DPS2X_VU1N_GEN_OVERRIDE=$(if ($vu1Micro) { ConvertTo-ForwardSlash (Join-Path $RepoRoot 'tools\vu1\vu1n_gen.py') })"
+$cmakeArgs += "-DPS2X_VU1N_HEADS_FILE=$(if ($vu1Micro) { ConvertTo-ForwardSlash (Join-Path $RepoRoot 'tools\vu1\vu1n_heads.txt') })"
+if (Test-Path (Join-Path $BuildDir 'CMakeCache.txt')) {
+    Invoke-Native $cmake $cmakeArgs | Out-Null
+}
+
+Write-Step 'Done'
+Write-Host 'Desktop runner: .\scripts\run-headless.ps1'
+Write-Host 'Android APK:    .\scripts\build-android.ps1'

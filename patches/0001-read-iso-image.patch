@@ -1,0 +1,31 @@
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 6c576db..3bb0e4d 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -38,6 +38,7 @@ static bool gowUsePcsx2Vu1(); // GOW_VU1_PCSX2=1, defined before PS2Runtime::ini
+ #include <sstream>
+ #include <cstdio>
+ #include <cstdlib>
++#include <system_error>
+ 
+ // GOW-Port: audio device position for the movie A/V check (GOW_MPEG_DIAG, Kernel/Stubs/MPEG.cpp): frames the device
+ // has played (including silence fill) and frames the sound engine produced (= GOW_AUDIO_PCM file position).
+@@ -1219,6 +1220,18 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
+         paths.hostRoot = paths.elfDirectory;
+         paths.cdRoot = paths.elfDirectory;
+         paths.mcRoot = paths.elfDirectory / "mc0";
++
++        // Kit: serve the disc straight from the ISO image instead of a copied disc tree.
++        // GOW2_ISO wins; otherwise gow2.iso next to the boot ELF (Android app files dir).
++        const char *isoOverride = std::getenv("GOW2_ISO");
++        const std::filesystem::path isoPath = (isoOverride && *isoOverride)
++                                                  ? std::filesystem::path(isoOverride)
++                                                  : paths.elfDirectory / "gow2.iso";
++        std::error_code ec;
++        if (std::filesystem::is_regular_file(isoPath, ec))
++        {
++            paths.cdImage = isoPath;
++        }
+     }
+ 
+     setIoPaths(paths);
