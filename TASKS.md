@@ -21,8 +21,8 @@ Statuses: `[ ]` todo, `[~]` in progress, `[x]` done, `[!]` blocked.
 - [x] Gradle/NativeActivity host `android-runner/` (arm64-v8a, 16 KB pages,
       boot ELF path baked from the application id).
 - [x] Gradle 8.9 wrapper + AGP 8.6.1 configuration succeeds.
-- [~] `assembleDebug` native build (running).
-- [ ] Install APK, push ELF + ISO, boot on device.
+- [x] `assembleDebug` native build (19m45s on 4 cores; 326 objects, warnings only).
+- [ ] Install APK, push ELF + ISO, boot on device (no adb device attached yet).
 - [ ] Capture ≥300 frames of logcat with no fatal signal; record evidence in
       `VERIFICATION.md`.
 - [ ] Measure interpreter speed (expected ~3 FPS without native VU1/IOP).

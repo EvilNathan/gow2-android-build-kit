@@ -19,9 +19,26 @@ The ISO is read directly (`IoPaths.cdImage`); the full 8 GB disc is not copied.
 
 | Gate | Check | Result |
 | --- | --- | --- |
-| G1 | `.\scripts\build-android.ps1 -Configuration Debug` completes | pending (first build running) |
-| G2 | APK contains `lib/arm64-v8a/libps2EntryRunner.so` | pending |
-| G3 | `adb logcat -s ps2x` shows EE/IOP boot and ≥300 frames without a fatal signal | pending |
+| G1 | `.\scripts\build-android.ps1 -Configuration Debug` completes | **pass** — `BUILD SUCCESSFUL in 19m 45s`, 326 objects, warnings only |
+| G2 | APK contains `lib/arm64-v8a/libps2EntryRunner.so` | **pass** — `dist/gow2-android-debug.apk`, 66,740,355 bytes, only release lib packaged |
+| G3 | `adb logcat -s ps2x` shows EE/IOP boot and ≥300 frames without a fatal signal | pending — `adb devices` empty |
+
+G2 details (`llvm-readelf` / `llvm-nm` from NDK 27.3):
+
+```
+Machine: AArch64, Type: DYN
+LOAD ... R E 0x4000
+LOAD ... RW  0x4000
+LOAD ... RW  0x4000
+T ANativeActivity_onCreate
+T android_main
+T _Z21FUN_00228f90_0x228f90PhP12R5900ContextP10PS2Runtime
+```
+
+The packaged `.so` has no `.debug_*` sections and no `.symtab` (AGP stripped it);
+dynamic symbols include the recompiled game functions, so the generated code is
+linked. `PS2X_FORCE_NULL_GS=1` and the ISO path are compile-time inputs, not
+device-side configuration.
 
 Expected M1 characteristics: no-op GS (no pixels), interpreter VU1/IOP, arm64
 only. G2/G3 cannot pass before G1.
