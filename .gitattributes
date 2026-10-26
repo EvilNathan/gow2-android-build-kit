@@ -1,5 +1,5 @@
-# Keep the engine patch byte-stable on every platform; git apply depends on it.
-engine.patch text eol=lf
+# Keep kit patches byte-stable on every platform; git apply depends on it.
+patches/*.patch text eol=lf
 
 # Windows batch files need CRLF.
 *.bat text eol=crlf
