@@ -1,73 +1,54 @@
 # Notices and licenses
 
-This build kit contains only original scripts, Java glue code, documentation,
-and a source patch. It does **not** contain the game, the game ELF, an ISO,
-translated game code, a memory card, or an APK.
+This build kit contains only scripts, documentation, small compatibility
+headers, source patches, and an Android host project. It does **not** contain
+the game, the game ELF, an ISO, translated game code, a memory card, or an APK.
 
 ## Build kit
 
-The scripts, Android glue, and documentation in this kit are released under the
-MIT License. See `LICENSE`.
+The kit (scripts, Android runner, patches, compatibility headers, docs) is
+released under the **GNU General Public License v3.0**. See `LICENSE`.
 
-The changes in `engine.patch` are derived from
-[`snuri00/ps2-web-recomp`](https://github.com/snuri00/ps2-web-recomp), which is
-distributed under the MIT License, Copyright (c) 2026 Samir Nuri. The full
-upstream license is included as `LICENSE-ENGINE.txt`. The patch remains under
-the upstream MIT terms.
+It is built on [DaniSBR1/PS2Recomp](https://github.com/DaniSBR1/PS2Recomp),
+branch `godofwar2`, pinned at `379fa48b1a292eb7f688ccdc202d97f5ffc09c6d`. That
+engine is GPL-3.0 and is fetched as a git submodule (`PS2Recomp/`); it remains
+under its own copyright and license. The engine includes:
 
-## Downloaded dependencies
+- code derived from PCSX2's EE/VU reference implementation (GPL-3.0+),
+- an OpenGL GS backend derived from the Shadow of the Colossus fork
+  (GPL-3.0), as noted in its source headers,
+- GoW-specific runtime work by the PS2Recomp contributors.
 
-`scripts/setup.ps1` downloads these dependencies into `engine/third_party/` on
-your machine. They are not part of this kit.
+## Build-time dependencies (not vendored)
 
-| Dependency | Version | License | Source |
-| --- | --- | --- | --- |
-| SDL3 | 3.4.18 | zlib | https://github.com/libsdl-org/SDL/releases/tag/release-3.4.18 |
-| wgpu-native | 29.0.1.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu-native/releases/tag/v29.0.1.1 |
-| wgpu / naga / Rust crates inside wgpu-native | bundled by wgpu-native | MIT OR Apache-2.0 (per crate) | https://github.com/gfx-rs/wgpu |
-| libadrenotools + linkernsbypass | 8fae8ce254dfc1344527e05301e43f37dea2df80 | BSD-2-Clause, Copyright (c) 2021 Billy Laws | https://github.com/bylaws/libadrenotools |
+| Dependency | License | Use |
+| --- | --- | --- |
+| sse2neon v1.9.1 | MIT | x86 intrinsics on arm64 (fetched by CMake) |
+| raylib 5.5 | zlib | window, input, audio (fetched by CMake) |
+| fmt | MIT | recompiler formatting (fetched by CMake) |
+| rabbitizer | MIT | MIPS decoding (fetched by CMake) |
+| libdwarf | LGPL-2.1 (upstream terms) | recompiler DWARF symbols |
+| libmpeg2 | GPL-2.0+ | MPEG video decoding (runtime) |
+| FFmpeg (prebuilt, Windows, opt-in) | LGPL | alternative video backend, off by default |
+| Dear ImGui / rlImGui | MIT | desktop debug UI only (off on Android) |
+| Gradle wrapper 8.9 | Apache-2.0 | Android build |
+| Android NDK libc++ | Apache-2.0 with LLVM exception | runtime |
 
-The Android app bundles SDL's Java activity classes (`org/libsdl/app/*.java`)
-so that the static SDL3 build can be driven without a separate `libSDL3.so`.
-Those files are part of SDL3 and are covered by the zlib license reproduced in
-`third_party/LICENSE-SDL3.txt`.
+Each dependency is downloaded by CMake/Gradle at build time and keeps its own
+license files. The Android SDK, NDK, CMake, Clang, Ninja, Git, Python, and JDK
+are installed separately and are not redistributed by this kit.
 
-Each download includes its own license files. SDL3's license is at
-`engine/third_party/SDL3-3.4.18/LICENSE.txt`; wgpu-native's metadata and license
-information is in the downloaded archive and its repository.
+## Legacy parts from the previous wgpu kit (MIT)
 
-libadrenotools and its linkernsbypass submodule are BSD-2-Clause. The Android
-build may include them in `libmain.so` and the hook libraries, so the required
-notice is reproduced here:
+These files remain for reference and are **not** part of the Android path:
 
-> BSD 2-Clause License
->
-> Copyright (c) 2021, Billy Laws
->
-> Redistribution and use in source and binary forms, with or without
-> modification, are permitted provided that the following conditions are met:
->
-> 1. Redistributions of source code must retain the above copyright notice, this
->    list of conditions and the following disclaimer.
->
-> 2. Redistributions in binary form must reproduce the above copyright notice,
->    this list of conditions and the following disclaimer in the documentation
->    and/or other materials provided with the distribution.
->
-> THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-> AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-> IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-> DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-> FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-> DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-> SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-> CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-> OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-> OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- `android/` — the old SDL3/SAF Java shell, originally MIT
+  (Copyright (c) 2026 Samir Nuri and kit contributors), including
+  `org/libsdl/app/*.java` from SDL3 (zlib; see `third_party/LICENSE-SDL3.txt`),
+- `LICENSE-ENGINE.txt` — MIT license of `snuri00/ps2-web-recomp`,
+- `docs/legacy/*` — old wgpu documentation.
 
-The Gradle wrapper is Apache License 2.0. The Android SDK, NDK, CMake, Clang,
-Ninja, Git, Python, and JDK are installed separately and remain under their own
-licenses; this kit does not redistribute them.
+They stay under their original licenses.
 
 ## Game content and trademarks
 
