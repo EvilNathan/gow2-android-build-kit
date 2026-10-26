@@ -1,5 +1,4 @@
 # Never commit game-derived material.
-engine/
 generated/
 games/
 build/
@@ -8,15 +7,20 @@ dist/
 *.ELF
 *.elf
 *.ps2
+out/logs/
 
 # Android/Gradle local state.
+android-runner/.gradle/
+android-runner/local.properties
+android-runner/build/
+android-runner/app/build/
+android-runner/app/.cxx/
 android/.gradle/
 android/local.properties
 android/app/build/
 android/build/
 android/app/.cxx/
 android/.cxx/
-android/captures/
 .android/
 .local/
 
@@ -24,3 +28,4 @@ android/captures/
 *.apk
 *.aab
 *.zip
+

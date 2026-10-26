@@ -1,0 +1,30 @@
+# IRX functions replaced by native C++ (ps2xIOP/src/native/iop_native_overrides.cpp).
+# <module ident> <offset hex from the module base> <name>
+# libsd_irx: offsets of God of War II's LIBSD.IRX (text 0x4bb0), not God of War's (docs/NOTES.md)
+mc2_d_irx 0c8c read_page
+mc2_d_irx 0fdc write_page
+mc2_d_irx 0a98 erase_block
+mc2_d_irx 13a8 get_specs
+mc2_d_irx 0650 init_card
+mc2_d_irx 164c probe
+mc2_d_irx 08d8 probe_f3
+sio2d_irx 0978 probe_pad
+sio2d_irx 0a1c probe_card
+libsd_irx 48e4 sceSdInit
+libsd_irx 39a0 sceSdSetParam
+libsd_irx 39fc sceSdGetParam
+libsd_irx 3a5c sceSdSetSwitch
+libsd_irx 3a94 sceSdGetSwitch
+libsd_irx 3acc sceSdSetAddr
+libsd_irx 3b30 sceSdGetAddr
+libsd_irx 3fec sceSdSetCoreAttr
+libsd_irx 1890 sceSdVoiceTrans
+libsd_irx 1c70 sceSdBlockTrans
+libsd_irx 1b10 sceSdVoiceTransStatus
+libsd_irx 2024 sceSdBlockTransStatus
+libsd_irx 0c2c sceSdSetEffectAttr
+libsd_irx 416c sceSdSetTransIntrHandler
+libsd_irx 097c sceSdSetEffectWorkArea
+sio2man_irx 0000 ctrl_set
+sio2man_irx 0014 ctrl_get
+libsd_irx 1550 bus_setup

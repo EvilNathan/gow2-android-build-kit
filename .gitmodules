@@ -1,3 +1,5 @@
-[submodule "engine"]
-	path = engine
-	url = https://github.com/snuri00/ps2-web-recomp.git
+[submodule "PS2Recomp"]
+	path = PS2Recomp
+	url = https://github.com/DaniSBR1/PS2Recomp.git
+	branch = godofwar2
+	ignore = dirty
