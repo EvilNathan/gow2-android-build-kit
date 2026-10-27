@@ -47,12 +47,15 @@ if ($Build -or -not (Test-Path $exe)) {
 $env:GOW2_ISO = if (Test-Path $IsoPathFile) { (Get-Content $IsoPathFile -TotalCount 1).Trim() } else { '' }
 if (-not $env:GOW2_ISO -or -not (Test-Path $env:GOW2_ISO)) { throw 'No ISO recorded. Run .\scripts\extract-disc.ps1 -Iso "<path>.iso".' }
 
+$elf = Get-GameElfPath
+if (-not (Test-Path $elf)) { throw "Game ELF not found at $elf. Run .\scripts\extract-disc.ps1 -Iso `"<path>.iso`"." }
+
 $log = Join-Path $LogDir 'desktop-headless.log'
 $outLog = Join-Path $LogDir 'desktop-headless.out.log'
 $errLog = Join-Path $LogDir 'desktop-headless.err.log'
 
-Write-Step "Running the desktop runner for $Seconds s (ISO: $env:GOW2_ISO)"
-$proc = Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -PassThru -NoNewWindow `
+Write-Step "Running the desktop runner for $Seconds s (ELF: $elf, ISO: $env:GOW2_ISO)"
+$proc = Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -ArgumentList "`"$elf`"" -PassThru -NoNewWindow `
     -RedirectStandardOutput $outLog -RedirectStandardError $errLog
 if (-not $proc.WaitForExit($Seconds * 1000)) {
     & taskkill /PID $proc.Id /T /F | Out-Null
