@@ -43,6 +43,21 @@ device-side configuration.
 Expected M1 characteristics: no-op GS (no pixels), interpreter VU1/IOP, arm64
 only. G2/G3 cannot pass before G1.
 
+## Session 2026-10-28 — host layer, engine patches, ISO reader
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Translation re-run | `.\scripts\recompile.ps1` | **pass** — 6,609 units + `register_functions.cpp`, 6,612 files synced |
+| Tools build | `.\scripts\build-tools.ps1` | **pass** — `ps2_recomp.exe`, `ps2_analyzer.exe` (exit 0) |
+| Engine patches | `git -C PS2Recomp diff --stat` | 5 files, +183/−8 — `0003-gs-vulkan-select`, `0004-android-host` |
+| ISO reader, synthetic | `iso_extract_test.exe --self-test <dir>` | **pass** — 26/26 checks (multi-extent, layer 1, fd, SHA1 mismatch, `IOP_MOD/`) |
+| ISO reader, real ISO | `iso_extract_test.exe "<iso>" <dir>` | **pass** — 24/24 checks; `SCUS_974.81` SHA1 `E6A62A0F3E781C29513F563F4625B9B3A9103C56`; layer-1 `PART2.PAK` LSN 2084139, 4,265,340,928 B; 10 root `*.IRX` |
+| Host/Java typecheck | teammate runs (`javac` vs `android-35`, NDK `clang++ -fsyntax-only`) | reported clean; **not re-run by the Lead** |
+
+Not verified yet (tracked in `TASKS.md`, "Open TODOs"): desktop compile of the
+patched engine, Android build of the new host layer, on-device boot, and the
+Vulkan backend itself (not implemented).
+
 ## Gates for later milestones
 
 - M2: first frame submitted through `GSVkBackend`, screenshot compared with the

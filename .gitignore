@@ -29,3 +29,8 @@ android/.cxx/
 *.aab
 *.zip
 
+
+# Stray compiler leftovers from ad-hoc typechecks.
+*.obj
+*.pdb
+*.ilk

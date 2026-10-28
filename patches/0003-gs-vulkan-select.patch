@@ -1,0 +1,42 @@
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 0dc9480..f78f7ca 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -2,6 +2,9 @@
+ #include "runtime/gs/gs_backend.h"
+ // GOW-Port: CPU de referencia por defecto; OpenGL/cola seleccionables.
+ #include "runtime/gs/gs_threaded_backend.h"
++#if defined(PS2X_ANDROID_VULKAN_GS)
++#include "gs_vk_backend.h" // Kit: raw Vulkan GS backend (Android)
++#endif
+ #include "runtime/gs/gs_shared_present.h"
+ #include "ps2_log.h"
+ #include "runtime/ps2_perf.h"
+@@ -323,7 +326,13 @@ namespace
+ 
+ 
+ GS::GS()
++#if defined(PS2X_FORCE_NULL_GS)
++    : m_backend(std::make_unique<GSNullBackend>())
++#elif defined(PS2X_ANDROID_VULKAN_GS)
++    : m_backend(std::make_unique<GSThreadedBackend>(std::make_unique<GSVkBackend>()))
++#else
+     : m_backend(GSThreadedBackend::MakeDefault())
++#endif
+ {
+     reset();
+ }
+@@ -334,7 +343,13 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
+     m_localMemorySize = vramSize;
+     m_privRegs = privRegs;
+     if (!m_backend)
++#if defined(PS2X_FORCE_NULL_GS)
++        m_backend = std::make_unique<GSNullBackend>();
++#elif defined(PS2X_ANDROID_VULKAN_GS)
++        m_backend = std::make_unique<GSThreadedBackend>(std::make_unique<GSVkBackend>());
++#else
+         m_backend = GSThreadedBackend::MakeDefault();
++#endif
+     m_backend->Initialize(vram, vramSize);
+     reset();
+ }

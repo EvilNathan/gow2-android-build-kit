@@ -1,0 +1,317 @@
+diff --git a/ps2xRuntime/src/lib/ps2_android_runtime.cpp b/ps2xRuntime/src/lib/ps2_android_runtime.cpp
+index 40e3dea..9a36cf9 100644
+--- a/ps2xRuntime/src/lib/ps2_android_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_android_runtime.cpp
+@@ -1,3 +1,76 @@
+-// TODO: on-screen touch joystick / button overlay.
++// Kit: Android game entry point. The Java host starts this on its own thread from
++// NativeBridge.nativeStart(); the engine's desktop main() is not used on Android.
++#include "ps2_runtime.h"
++
+ #if defined(__ANDROID__)
+-#endif // __ANDROID__
++#include "ps2x_host.h"
++
++#include <cstdlib>
++#include <string>
++#include <exception>
++#include <iostream>
++
++void ps2InstallEeDiff(PS2Runtime &runtime); // src/lib/ee_ref/ee_diff.cpp
++void ps2InstallEeWatch(PS2Runtime &runtime);
++void ps2InstallEePageWatch(PS2Runtime &runtime);
++
++#ifndef PS2X_DEFAULT_BOOT_ELF
++#define PS2X_DEFAULT_BOOT_ELF ""
++#endif
++
++namespace
++{
++    std::string bootElfPath()
++    {
++        if (const char *fromHost = std::getenv("GOW2_BOOT_ELF"); fromHost && *fromHost)
++            return fromHost;
++        return PS2X_DEFAULT_BOOT_ELF;
++    }
++}
++
++extern "C" int ps2x_android_game_main(void)
++{
++    ps2x::host::RequestExit(); // clear a pending exit from a previous session
++    const std::string filePathStr = bootElfPath();
++    if (filePathStr.empty())
++    {
++        ps2x::host::Log("ps2x", "[android] no boot ELF configured (GOW2_BOOT_ELF)");
++        return 2;
++    }
++
++    try
++    {
++        ps2x::host::Log("ps2x", "[android] booting %s", filePathStr.c_str());
++        PS2Runtime runtime;
++        if (!runtime.initialize("God of War II"))
++        {
++            ps2x::host::Log("ps2x", "[android] runtime initialize failed");
++            return 1;
++        }
++        if (!runtime.loadELF(filePathStr))
++        {
++            ps2x::host::Log("ps2x", "[android] loadELF failed: %s", filePathStr.c_str());
++            return 3;
++        }
++        ps2InstallEeDiff(runtime);
++        ps2InstallEeWatch(runtime);
++        ps2InstallEePageWatch(runtime);
++        runtime.run();
++        std::cout.flush();
++        std::cerr.flush();
++        ps2x::host::Log("ps2x", "[android] game loop finished");
++        return 0;
++    }
++    catch (const std::exception &e)
++    {
++        ps2x::host::Log("ps2x", "[android] fatal: %s", e.what());
++    }
++    catch (...)
++    {
++        ps2x::host::Log("ps2x", "[android] fatal: unknown exception");
++    }
++    return 1;
++}
++#else
++extern "C" int ps2x_android_game_main(void) { return 0; }
++#endif
+\ No newline at end of file
+diff --git a/ps2xRuntime/src/lib/ps2_audio_device.cpp b/ps2xRuntime/src/lib/ps2_audio_device.cpp
+index 55c60b0..1817f81 100644
+--- a/ps2xRuntime/src/lib/ps2_audio_device.cpp
++++ b/ps2xRuntime/src/lib/ps2_audio_device.cpp
+@@ -4,7 +4,20 @@
+ // sound engine's stream is played on that device through miniaudio directly. The
+ // miniaudio implementation is raylib's own (compiled in raudio.c); the configuration macros below must stay identical
+ // to raudio.c's, because they change miniaudio's structure layouts.
+-#if !defined(PLATFORM_VITA)
++#if defined(__ANDROID__)
++// Kit: AAudio output, opened on demand by the host when the game starts producing SPU2 samples.
++#include "ps2x_host.h"
++
++bool ps2AudioOpenNamedDevice(void (*fill)(void *, unsigned int), unsigned int sampleRate)
++{
++    return ps2x::host::StartAudio(static_cast<int>(sampleRate), fill);
++}
++
++void ps2AudioCloseNamedDevice()
++{
++    ps2x::host::StopAudio();
++}
++#elif !defined(PLATFORM_VITA)
+ #define MA_NO_JACK
+ #define MA_NO_WAV
+ #define MA_NO_FLAC
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+index b008aea..a12bc25 100644
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -1,5 +1,8 @@
+ #include "runtime/ps2_pad.h"
+ #include "ps2_host_backend.h"
++#if defined(__ANDROID__)
++#include "ps2x_host.h" // Kit: pad state comes from the Java touch/gamepad host.
++#endif
+ #include <cstdio>
+ #include <cstring>
+ 
+@@ -42,6 +45,22 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+     data[3] = 0xFF;
+     data[4] = data[5] = data[6] = data[7] = kPadStickCenter;
+ 
++#if defined(__ANDROID__)
++    // Kit: one virtual pad driven by the Java host (touch overlay + gamepad mapper). Bits are active low.
++    uint16_t pressed = 0u;
++    int8_t lx = 0, ly = 0, rx = 0, ry = 0;
++    ps2x::host::GetPadState(pressed, lx, ly, rx, ry);
++    data[4] = static_cast<uint8_t>(kPadStickCenter + rx);
++    data[5] = static_cast<uint8_t>(kPadStickCenter + ry);
++    data[6] = static_cast<uint8_t>(kPadStickCenter + lx);
++    data[7] = static_cast<uint8_t>(kPadStickCenter + ly);
++    const uint16_t androidButtons = static_cast<uint16_t>(~pressed);
++    data[2] = static_cast<uint8_t>(androidButtons & 0xFF);
++    data[3] = static_cast<uint8_t>(androidButtons >> 8);
++    applyRumble(true);
++    return true;
++#endif
++
+     uint16_t btns = 0xFFFFu;
+     // GOW-Port: GLFW can list racing gear (handbrake, pedals) as gamepads before the real pad. The pad whose
+     // button was pressed last becomes the active one (press edges, so idle devices never take over);
+@@ -175,7 +194,11 @@ void PSPadBackend::setActuators(int port, bool small, uint8_t large)
+ // refresh = periodic call from readState: only backends whose rumble times out need it resent.
+ void PSPadBackend::applyRumble(bool refresh)
+ {
+-#ifdef _WIN32
++#if defined(__ANDROID__)
++    (void)refresh;
++    ps2x::host::SetRumble(m_large / 255.0f, m_small ? 1.0f : 0.0f);
++    return;
++#elif defined(_WIN32)
+     // raylib's GLFW backend has no vibration: XInput and Sony HID pads directly. Both keep the motors running until changed.
+     if (refresh)
+         return;
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 6c576db..5e0b7e4 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -3,6 +3,9 @@
+ #include "vu_pcsx2/pcsx2_vu1_bridge.h"
+ static bool gowUsePcsx2Vu1(); // GOW_VU1_PCSX2=1, defined before PS2Runtime::initialize
+ #include "runtime/gs/gs_host_present.h" // GOW-Port: consumidor privado del host.
++#if defined(__ANDROID__)
++#include "ps2x_host.h" // Kit: the Java host owns the window, input, audio and logs.
++#endif
+ #include "ps2_log.h"
+ #include "runtime/ps2_perf.h"
+ #include "ps2_stubs.h"
+@@ -38,6 +41,7 @@ static bool gowUsePcsx2Vu1(); // GOW_VU1_PCSX2=1, defined before PS2Runtime::ini
+ #include <sstream>
+ #include <cstdio>
+ #include <cstdlib>
++#include <system_error>
+ 
+ // GOW-Port: audio device position for the movie A/V check (GOW_MPEG_DIAG, Kernel/Stubs/MPEG.cpp): frames the device
+ // has played (including silence fill) and frames the sound engine produced (= GOW_AUDIO_PCM file position).
+@@ -56,6 +60,13 @@ namespace
+     bool g_spu2NamedDevice = false; // playing on a chosen device (ps2_audio_device.cpp), not the raylib stream
+     constexpr size_t kSpu2MaxLatencyFrames = 4800u; // 100 ms a 48 kHz
+ 
++#if defined(__ANDROID__)
++    // Kit: AAudio is opened on demand by the host when the SPU2 output starts (ps2_audio_device.cpp).
++    bool hostAudioDeviceReady() { return true; }
++#else
++    bool hostAudioDeviceReady() { return IsAudioDeviceReady(); }
++#endif
++
+     void spu2AudioCallback(void *buffer, unsigned int frames)
+     {
+         int16_t *out = static_cast<int16_t *>(buffer);
+@@ -86,7 +97,7 @@ namespace
+         const char *setting = std::getenv("GOW_AUDIO");
+         const bool muted = setting && setting[0] == '0';
+         const bool recording = std::getenv("GOW_AUDIO_PCM") != nullptr;
+-        if (g_spu2StreamActive || source == nullptr || !IsAudioDeviceReady() || (muted && !recording))
++        if (g_spu2StreamActive || source == nullptr || !hostAudioDeviceReady() || (muted && !recording))
+             return;
+         g_spu2AudioSource.store(source, std::memory_order_release);
+         if (!muted && ps2AudioOpenNamedDevice(spu2AudioCallback, 48000u)) // a muted recording stays on the silent stream
+@@ -823,7 +834,10 @@ bool PS2Runtime::initialize(const char *title)
+             return false;
+         }
+ 
+-#if defined(PLATFORM_VITA)
++#if defined(__ANDROID__)
++        // Kit: the Java host owns the ANativeWindow; the Vulkan GS backend builds the swapchain from it.
++        m_hostWindowOwned = true;
++#elif defined(PLATFORM_VITA)
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
+ #else
+         // GOW-Port: GOW_VSYNC=1 waits for the monitor's refresh on every swap (raylib only applies the hint when the
+@@ -860,27 +874,39 @@ bool PS2Runtime::initialize(const char *title)
+             }
+         }
+ #endif
++#if !defined(__ANDROID__)
+         m_hostWindowOwned = IsWindowReady();
++#endif
+         if (!m_hostWindowOwned)
+         {
+             std::cerr << "Failed to create the runtime host window" << std::endl;
+             return false;
+         }
++#if !defined(__ANDROID__)
+         // GOW-Port: el backend GPU solo puede compartir si el host ya existe.
+         m_hostPresentation->captureHostContext();
++#endif
+         if (!syncCoreSubsystems())
+         {
+             std::cerr << "Failed to bind runtime core subsystems" << std::endl;
+             shutdownHostGraphics();
+             return false;
+         }
++#if !defined(__ANDROID__)
+         m_hostPresentation->restoreHostContext();
+-#if !defined(PLATFORM_VITA)
++#endif
++#if defined(__ANDROID__)
++        // Kit: the host opens AAudio from ps2AudioOpenNamedDevice when the SPU2 output starts.
++        m_audioBackend.setAudioReady(true);
++        startSpu2Audio(m_iopSubsystem.get());
++#elif !defined(PLATFORM_VITA)
+         InitAudioDevice();
+         m_audioBackend.setAudioReady(IsAudioDeviceReady());
+         startSpu2Audio(m_iopSubsystem.get()); // GOW-Port
+ #endif
++#if !defined(__ANDROID__)
+         SetTargetFPS(60);
++#endif
+         if (m_debugUiInitCallback)
+         {
+             m_debugUiInitCallback(*this, m_debugUiUserData);
+@@ -907,9 +933,11 @@ void PS2Runtime::shutdownHostGraphics()
+     if (!m_hostWindowOwned)
+         return;
+     m_memory.stopGsWorker(); // GOW-Port: no GS work after the host context goes away
++#if !defined(__ANDROID__)
+     m_hostPresentation->shutdown(m_gs);
+     if (IsWindowReady())
+         CloseWindow();
++#endif
+     m_hostWindowOwned = false;
+ }
+ 
+@@ -1219,6 +1247,18 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
+         paths.hostRoot = paths.elfDirectory;
+         paths.cdRoot = paths.elfDirectory;
+         paths.mcRoot = paths.elfDirectory / "mc0";
++
++        // Kit: serve the disc straight from the ISO image instead of a copied disc tree.
++        // GOW2_ISO wins; otherwise gow2.iso next to the boot ELF (Android app files dir).
++        const char *isoOverride = std::getenv("GOW2_ISO");
++        const std::filesystem::path isoPath = (isoOverride && *isoOverride)
++                                                  ? std::filesystem::path(isoOverride)
++                                                  : paths.elfDirectory / "gow2.iso";
++        std::error_code ec;
++        if (std::filesystem::is_regular_file(isoPath, ec))
++        {
++            paths.cdImage = isoPath;
++        }
+     }
+ 
+     setIoPaths(paths);
+@@ -2708,16 +2748,27 @@ void PS2Runtime::run()
+                 }
+             }
+         });
++#if defined(__ANDROID__)
++        // Kit: the Vulkan GS backend presents from GS::latchHostPresentationFrame; the host only paces the frame.
++        m_gs.latchHostPresentationFrame();
++        ps2x::host::GameFrame();
++#else
+         // GOW-Port: el helper real termina el batch antes del próximo Acquire.
+         m_hostPresentation->renderFrame(m_gs, m_eeScheduler->currentVSyncTick(), [this]
+         {
+             if (m_debugUiInitialized && m_debugUiDrawCallback)
+                 m_debugUiDrawCallback(*this, m_debugUiUserData);
+         });
++#endif
+         if (ps2_perf::countFrames()) ps2_perf::hostFrames.fetch_add(1, std::memory_order_relaxed);
+         ps2_perf::report();
+ 
+-        if (WindowShouldClose())
++#if defined(__ANDROID__)
++        const bool hostWantsExit = ps2x::host::ShouldExit();
++#else
++        const bool hostWantsExit = WindowShouldClose();
++#endif
++        if (hostWantsExit)
+         {
+             RUNTIME_LOG("[run] window close requested, breaking out of loop");
+             requestStop();
