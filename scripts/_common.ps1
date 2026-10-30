@@ -105,27 +105,62 @@ function Ensure-Engine {
     }
 }
 
+function Set-EngineLfCheckout {
+    # The kit patches are LF. A clone made with core.autocrlf=true checks the
+    # engine out as CRLF, which makes `git apply` fail on hunks with accented
+    # comments. Force LF for this checkout; existing files keep their bytes
+    # until they are refreshed from the index (see Apply-EnginePatches).
+    if (-not (Test-Path (Join-Path $RecompDir '.git'))) { return }
+    Invoke-GitQuiet @('-C', $RecompDir, 'config', 'core.autocrlf', 'false') | Out-Null
+}
+
+# Runs git and returns only the exit code: PowerShell 5.1 turns native stderr
+# into a terminating error under $ErrorActionPreference = 'Stop', and `git apply
+# --check` uses stderr for the "does not apply" case.
+function Invoke-GitQuiet([string[]]$Arguments) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & git @Arguments 2>&1 | Out-Null
+        return $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
 function Apply-EnginePatches {
     if (-not (Test-Path $PatchesDir)) { return }
     $patches = Get-ChildItem $PatchesDir -Filter '*.patch' -File | Sort-Object Name
     if (-not $patches) { return }
 
+    Set-EngineLfCheckout
+
+    # The patches are ordered and each one applies on top of the previous, so a
+    # partially patched tree cannot be inspected patch by patch. Instead, drop
+    # any tracked engine modification (the kit patches are the source of truth;
+    # untracked files such as generated/ survive) and rebuild the stack from the
+    # pinned revision. checkout-index also rewrites a CRLF clone as LF.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $tracked = & git -C $RecompDir status --porcelain --untracked-files=no 2>$null
+        if ($tracked) {
+            Write-Host '  resetting tracked engine changes'
+            & git -C $RecompDir checkout -- . 2>$null | Out-Null
+        }
+        & git -C $RecompDir checkout-index -f -a 2>$null | Out-Null
+    }
+    finally { $ErrorActionPreference = $previous }
+
     Write-Step 'Kit patches'
     foreach ($patch in $patches) {
-        & git -C $RecompDir apply --check --ignore-whitespace $patch.FullName 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Invoke-Native git @('-C', $RecompDir, 'apply', '--ignore-whitespace', $patch.FullName)
-            Write-Host "  applied $($patch.Name)"
+        $check = Invoke-GitQuiet @('-C', $RecompDir, 'apply', '--check', '--ignore-whitespace', $patch.FullName)
+        if ($check -ne 0) {
+            throw "Patch $($patch.Name) does not apply to PS2Recomp at $EnginePin. Delete PS2Recomp\ and rerun setup.ps1."
         }
-        else {
-            & git -C $RecompDir apply --reverse --check --ignore-whitespace $patch.FullName 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "  already applied $($patch.Name)"
-            }
-            else {
-                throw "Patch $($patch.Name) does not apply to PS2Recomp at $EnginePin. Delete PS2Recomp\ and rerun setup.ps1."
-            }
-        }
+        Invoke-Native git @('-C', $RecompDir, 'apply', '--ignore-whitespace', $patch.FullName)
+        Write-Host "  applied $($patch.Name)"
     }
 }
 

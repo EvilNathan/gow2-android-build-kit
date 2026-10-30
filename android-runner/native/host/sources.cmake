@@ -25,10 +25,15 @@ target_sources(ps2EntryRunner PRIVATE
     "${PS2X_HOST_DIR}/storage.cpp"
     "${PS2X_HOST_DIR}/disc.cpp"
     "${PS2X_HOST_DIR}/jni_bridge.cpp"
-    "${PS2X_HOST_DIR}/game_entry.cpp"
 )
 
 target_include_directories(ps2EntryRunner PRIVATE "${PS2X_HOST_DIR}")
+
+# The engine patch (0004-android-host) includes ps2x_host.h from ps2_runtime
+# (window/audio/pad/log/pacing), so that target needs the header directory too.
+if(TARGET ps2_runtime)
+    target_include_directories(ps2_runtime PRIVATE "${PS2X_HOST_DIR}")
+endif()
 
 # ISO9660 module (owned by the iso-tools teammate).  Added only when present so
 # the host still compiles before that module lands; disc.cpp drops back to a

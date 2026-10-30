@@ -5,6 +5,8 @@ plugins {
 // Files pushed by scripts/install-android-tools.ps1 / build-android.ps1.
 def ps2xBootElfName = project.findProperty('ps2xBootElfName') ?: 'SCUS_974.81'
 def ps2xNullGs = (project.findProperty('ps2xNullGs') ?: 'ON').toString().toUpperCase()
+def ps2xGsVk = (project.findProperty('ps2xGsVk') ?: 'ON').toString().toUpperCase()
+def ps2xNativeVu1Dir = project.findProperty('ps2xNativeVu1Dir') ?: ''
 def appId = 'com.gow2.android'
 def filesDir = "/storage/emulated/0/Android/data/${appId}/files"
 
@@ -13,12 +15,17 @@ android {
     compileSdk 35
     ndkVersion '27.3.13750724'
 
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
     defaultConfig {
         applicationId appId
         minSdk 28
         targetSdk 35
         versionCode 1
-        versionName '0.1.0'
+        versionName '1.0.0'
 
         externalNativeBuild {
             cmake {
@@ -31,7 +38,9 @@ android {
                         '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=32',
                         '-DANDROID_CPP_FEATURES=rtti exceptions',
                         "-DPS2X_DEFAULT_BOOT_ELF=${filesDir}/${ps2xBootElfName}",
-                        "-DPS2X_FORCE_NULL_GS=${ps2xNullGs}"
+                        "-DPS2X_FORCE_NULL_GS=${ps2xNullGs}",
+                        "-DPS2X_GS_VK=${ps2xGsVk}",
+                        "-DPS2X_ANDROID_NATIVE_VU1_DIR=${ps2xNativeVu1Dir}"
                 targets 'ps2EntryRunner'
             }
         }

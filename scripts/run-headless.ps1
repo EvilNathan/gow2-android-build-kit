@@ -16,7 +16,7 @@ if ($Android) {
     Write-Step "Launching on the device, capturing logcat for $Seconds s"
     Invoke-Native $adb @('shell', 'am', 'force-stop', 'com.gow2.android')
     Invoke-Native $adb @('logcat', '-c')
-    Invoke-Native $adb @('shell', 'am', 'start', '-n', 'com.gow2.android/android.app.NativeActivity')
+    Invoke-Native $adb @('shell', 'am', 'start', '-n', 'com.gow2.android/.MainActivity')
 
     $job = Start-Job -ScriptBlock {
         param($Adb, $Seconds)

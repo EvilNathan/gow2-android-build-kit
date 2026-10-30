@@ -2,8 +2,9 @@
 
 Statuses: `[ ]` todo, `[~]` in progress, `[x]` done, `[!]` blocked.
 
-_Last update: 2026-10-28 (session pause — everything below was committed and
-pushed; see the "Open TODOs" section for what is left)._
+_Last update: 2026-10-30 (M1 closed on the build side: the patched engine builds
+on Windows, the host layer compiles for arm64 and the APK passes the static
+checks. Device bring-up and the Vulkan GS backend remain)._
 
 ## M0 — rebase onto PS2Recomp (done 2026-10-26)
 
@@ -14,19 +15,16 @@ pushed; see the "Open TODOs" section for what is left)._
 - [x] Extract boot ELF + IOP modules from the ISO; SHA1 matches
       `E6A62A0F3E781C29513F563F4625B9B3A9103C56`.
 - [x] Recompile: 6,609 generated units + `register_functions.cpp`
-      (re-run 2026-10-28, 6,612 files synced into the runner).
+      (re-run 2026-10-30, 6,610 files synced into the runner).
 - [x] `patches/0001-read-iso-image.patch` (disc image via `GOW2_ISO` or sibling
       `gow2.iso`).
 - [x] `patches/0002-null-gs-backend.patch` (`PS2X_FORCE_NULL_GS`).
 
-## M1 — Android arm64 boot (in progress)
+## M1 — Android arm64 boot (build side done 2026-10-30)
 
 - [x] Verify sse2neon/ARM path; add `compat/arm64` shims.
 - [x] Gradle/NativeActivity host `android-runner/` (arm64-v8a, 16 KB pages).
 - [x] Gradle 8.9 wrapper + AGP 8.6.1 configuration succeeds.
-- [x] `assembleDebug` native build (19m45s on 4 cores; 326 objects, warnings only).
-- [x] APK packaging check: `lib/arm64-v8a/libps2EntryRunner.so` only,
-      16 KB-aligned LOAD segments (see `VERIFICATION.md`, G2).
 - [x] Engine host patch `patches/0004-android-host.patch`: window, audio,
       present pacing, exit, pad and the `ps2x_android_game_main()` entry point.
 - [x] Java app + JNI host layer (`android-runner/native/host/**`,
@@ -35,17 +33,23 @@ pushed; see the "Open TODOs" section for what is left)._
       settings store, crash/log capture, ISO import UI.
 - [x] In-app ISO9660 reader + SHA1 boot-ELF extractor
       (`android-runner/native/iso/**`, validated against the real 7.95 GB ISO).
-- [ ] Java entry activity is still the old `NativeActivity` manifest: the app
-      must launch `MainActivity`/`GameActivity` (`android:hasCode="false"` and
-      `android.app.NativeActivity` are still in
-      `android-runner/app/src/main/AndroidManifest.xml`).
-- [ ] Wire `android-runner/app/build.gradle` to the new `native/CMakeLists.txt`
-      switches (`-DPS2X_GS_VK=`, `-DPS2X_ANDROID_NATIVE_VU1_DIR=`,
-      `-Dps2xNullGs=`) and bump `versionName` for the final APK.
-- [ ] `scripts/verify-android.ps1` (static APK/symbol checks) — not written yet.
-- [ ] Build the APK with the new host layer and the engine patches applied
-      (only the M1 null-GS APK has been built so far).
-- [ ] Install APK, push ELF + ISO, boot on device (no adb device attached).
+- [x] Launcher activity: `MainActivity` (ISO import via SAF, boot-ELF
+      extraction, settings dialog) replaces `android.app.NativeActivity`;
+      `GameActivity` hosts the SurfaceView and the native session.
+- [x] `android:hasCode="false"` removed; manifest declares `MainActivity`
+      (exported, launcher) and `GameActivity` (not exported).
+- [x] `android-runner/app/build.gradle` wired to the native switches
+      (`PS2X_GS_VK`, `PS2X_ANDROID_NATIVE_VU1_DIR`, `PS2X_FORCE_NULL_GS`),
+      `versionName 1.0.0`.
+- [x] `scripts/verify-android.ps1`: static APK checks (package, launcher, ABI,
+      minSdk, 16 KB LOAD alignment, AArch64).
+- [x] Host layer compiles for arm64 and the APK links
+      (unity-build symbol clashes fixed: `kPathLen`, weak
+      `ps2x_android_game_main`, `ps2x_host.h` include for `ps2_runtime`,
+      `SetSdkInt`/`GetSdkInt` defined).
+- [x] Build the APK end to end with the host layer and the engine patches:
+      `dist/gow2-android-debug.apk` (56 MB, null GS).
+- [ ] Install APK, import ISO, boot on device (no adb/device attached here).
 - [ ] Capture ≥300 frames of logcat with no fatal signal; record evidence in
       `VERIFICATION.md`.
 
@@ -84,27 +88,21 @@ pushed; see the "Open TODOs" section for what is left)._
    `GSVkBackend`, `compile_shaders.cmake`, `sources.cmake`, plus
    `tests/gs_units` and `tests/gs_probe`; verify the probe offscreen with the
    SwiftShader ICD (`C:\Program Files\Unity Hub\vk_swiftshader_icd.json`).
-2. **Prove the patched engine still compiles on desktop** (`scripts/run-headless.ps1
-   -Build`): patches 0003/0004 only add `#if defined(...)` branches, but they
-   were committed without a desktop compile.
-3. **Prove patches 0003/0004 apply from a pristine submodule** and make
-   `scripts/_common.ps1` set `git -C PS2Recomp config core.autocrlf false` before
-   `git apply` (the working copy is LF; a CRLF checkout can make the patches
-   fail).
-4. **Android app wiring** (items left in M1): manifest → `MainActivity`,
-   `build.gradle` CMake arguments + versionName 1.0.0, `MainActivity.java`
-   is still missing (only `GameActivity`, `DiscInstaller`, `NativeBridge`,
-   `PadMapper`, `Settings`, `SettingsStore`, `TouchControlsView` exist).
-5. **Compile the host layer for Android** (javac typecheck of the Java sources +
-   `clang++ -fsyntax-only` of `native/host/*.cpp`) and fix whatever the earlier
-   `-fsyntax-only` pass missed; then build the APK end to end.
-6. **PC capture pass** for native VU1/IOP (`GOW_VU1_CAPTURA`, IOP module dump),
+2. **Device bring-up** (user-driven): install, import ISO, logcat, screenshot,
+   `selftest-*.zip`; tune the ~20 FPS menu / ~10 FPS first-area targets. The
+   launcher activity is `com.gow2.android/.MainActivity`; place the ISO via the
+   in-app import or `scripts/push-game-data.ps1`.
+3. **PC capture pass** for native VU1/IOP (`GOW_VU1_CAPTURA`, IOP module dump),
    then `scripts/gen-native.ps1`, then measure the FPS gain on the desktop
    runner before trusting it on the phone.
-7. **Device bring-up** (user-driven): install, import ISO, logcat, screenshot,
-   `selftest-*.zip`; tune the ~20 FPS menu / ~10 FPS first-area targets.
-8. **Docs**: `README.md` build instructions, `.recomp.json` still says
-   Windows/PC target, `docs/` Android install guide, `scripts/verify-android.ps1`.
+4. **Desktop runner run** (`scripts/run-headless.ps1`) is still unverified on
+   this machine; only the `ps2_runtime` target has been compiled here (no GPU
+   session). The patched engine compiles on MSVC.
+
+Done in the 2026-10-30 session: day-one patch stack rebased so `0001`–`0004`
+apply from a pristine `PS2Recomp` checkout (`+183/−8`), LF checkout forced in
+`scripts/_common.ps1`, app/manifest/Gradle wiring, `verify-android.ps1`,
+`docs/ANDROID.md`, and the first full APK build with the host layer.
 
 ## Known constraints
 
@@ -114,6 +112,6 @@ pushed; see the "Open TODOs" section for what is left)._
   engine patch is needed).
 - No adb/device automation on this machine: device verification is manual.
 - 4 build cores; a full Android native build is ~20 min and the generated code
-  dominates it.
+  dominates it. An incremental host-only rebuild is ~30 s.
 - Heavy outputs (`build/`, `generated/`, `games/`, Gradle caches) live on `D:`
   through junctions because `C:` has ~14 GB free.

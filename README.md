@@ -54,14 +54,18 @@ no-op backend and the Android build only proves the CPU/IOP core boots.
 # 5. Android APK (arm64-v8a, 16 KB pages)
 .\scripts\build-android.ps1 -Install
 
-# 6. Push ELF + ISO to the device, then run and capture logcat
+# 6. Static APK checks (ABI, launcher, 16 KB LOAD alignment)
+.\scripts\verify-android.ps1
+
+# 7. Push ELF + ISO to the device, then run and capture logcat
 .\scripts\push-game-data.ps1
 .\scripts\run-headless.ps1 -Android -Seconds 60
 ```
 
 `build-all.ps1 -Iso <iso>` chains steps 1–5. The desktop runner can also be run
 with `run-headless.ps1 -Build`; it reads the same ISO through `GOW2_ISO`
-(no extracted disc needed).
+(no extracted disc needed). Install and troubleshooting notes live in
+[`docs/ANDROID.md`](docs/ANDROID.md).
 
 ## How it works
 
@@ -74,9 +78,11 @@ with `run-headless.ps1 -Build`; it reads the same ISO through `GOW2_ISO`
 4. At runtime the disc is read **directly from the ISO**:
    `IoPaths.cdImage` is set from `GOW2_ISO`, or from `gow2.iso` next to the
    boot ELF (the Android app files dir).
-5. On Android, the `android-runner/` NativeActivity loads
+5. On Android, the `android-runner/` app is a `MainActivity` launcher
+   (ISO import + boot-ELF extraction) plus a `GameActivity` that loads
    `libps2EntryRunner.so`; `compat/arm64/` maps leftover x86 intrinsic header
-   names onto sse2neon, and `patches/0002` installs the no-op GS for M1.
+   names onto sse2neon, `patches/0002` installs the no-op GS for M1 and
+   `patches/0004` routes window/audio/pad/log through the Java host.
 
 ## Layout
 

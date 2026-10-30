@@ -3,9 +3,9 @@
   "game": "God of War II",
   "system": "PS2",
   "type": "recomp",
-  "project": "God of War II: port nativo para PC",
+  "project": "God of War II: port nativo (PC + Android arm64)",
   "status": "in-progress",
-  "targets": ["Windows"],
+  "targets": ["Windows", "Android"],
   "toolchain": "PS2Recomp",
   "original": {
     "region": "USA",

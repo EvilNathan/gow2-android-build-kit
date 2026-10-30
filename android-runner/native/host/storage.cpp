@@ -13,10 +13,10 @@
 namespace ps2x::host {
 namespace {
 
-constexpr size_t kPathLen = 512;
+constexpr size_t kStoragePathLen = 512;
 
 std::mutex g_filesMutex;
-char g_filesDir[kPathLen] = {0};
+char g_filesDir[kStoragePathLen] = {0};
 
 } // namespace
 

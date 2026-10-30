@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <atomic>
 
 namespace ps2x::host {
 namespace {
@@ -18,6 +19,7 @@ constexpr int64_t kTickPeriodNs = 1000000000LL / kTickHz;
 
 std::mutex g_mutex;
 std::condition_variable g_cv;
+std::atomic<int> g_sdkInt{0};
 bool g_paused = false;
 bool g_shutdown = false;
 bool g_exitRequested = false;
@@ -46,6 +48,18 @@ uint64_t TickLocked()
 }
 
 } // namespace
+
+// Android API level, reported by the Java host in nativeStart().  Logged at
+// session start and used by patches that need a version gate.
+void SetSdkInt(int sdk)
+{
+    std::atomic_store(&g_sdkInt, sdk);
+}
+
+int GetSdkInt()
+{
+    return std::atomic_load(&g_sdkInt);
+}
 
 void SetPaused(bool paused)
 {

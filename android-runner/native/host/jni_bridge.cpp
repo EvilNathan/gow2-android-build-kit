@@ -23,9 +23,9 @@
 #include <pthread.h>
 #include <signal.h>
 
-// The engine patch (Lead) provides the strong definition; game_entry.cpp carries
-// the weak fallback.  Declared before its uses below.
-extern "C" int ps2x_android_game_main(void) __attribute__((weak));
+// The engine patch (patches/0004-android-host) provides the definition in
+// ps2_android_runtime.cpp.  Declared before its uses below.
+extern "C" int ps2x_android_game_main(void);
 
 namespace {
 
