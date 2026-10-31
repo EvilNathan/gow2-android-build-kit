@@ -34,3 +34,6 @@ android/.cxx/
 *.obj
 *.pdb
 *.ilk
+# gs_vk probe scratch (generated shader blobs / local vulkan header copies)
+android-runner/native/gs_vk/_gen/
+android-runner/native/gs_vk/_check/

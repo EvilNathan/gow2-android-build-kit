@@ -2,9 +2,10 @@
 
 Statuses: `[ ]` todo, `[~]` in progress, `[x]` done, `[!]` blocked.
 
-_Last update: 2026-10-30 (M1 closed on the build side: the patched engine builds
-on Windows, the host layer compiles for arm64 and the APK passes the static
-checks. Device bring-up and the Vulkan GS backend remain)._
+_Last update: 2026-10-31 (M2 build side: the raw Vulkan GS backend is written,
+compiles for arm64, and is linked into the APK with the null-GS switch off.
+The offscreen probe reaches draw dispatch on SwiftShader; pixel-exact checks
+and device bring-up remain)._
 
 ## M0 — rebase onto PS2Recomp (done 2026-10-26)
 
@@ -62,14 +63,42 @@ checks. Device bring-up and the Vulkan GS backend remain)._
       NDK `glslc` shader build, `cmake/embed_spirv.cmake` embedding,
       `PS2X_ANDROID_VULKAN_GS`), contract in
       `android-runner/native/gs_vk/README.md`.
-- [ ] **`GSVkBackend : GSRasterBackend` itself — not written.**
-      `android-runner/native/gs_vk/` contains only the README. This is the
-      single largest remaining piece (device/swapchain, VRAM textures, CLUT,
-      blend mapping, transfers, present).
-- [ ] Host lifecycle with `ANativeWindow` (no raylib GL dependency).
-- [ ] First pixels from the game; compare against PC OpenGL output.
-- [ ] `tests/gs_units` + `tests/gs_probe` (SwiftShader ICD) — directories are
-      empty.
+- [x] **`GSVkBackend : GSRasterBackend` written (2026-10-31).**
+      `gs_vk_backend.{h,cpp}`: dlopen Vulkan loader (`gs_vk_loader.*`, no link
+      dependency), device + swapchain from `ps2x::host::NativeWindow()`,
+      render targets keyed by FRAME.FBP with depth, VP-broadcast single
+      pipeline family, format tables + inverse tables in a device texture,
+      GSTextureStore-backed decodeDirect textures + index/palette textures,
+      CLUT-from-render-target rebuilt on the CPU through a target readback,
+      reinterpreting fetch (address math on the GPU in `shaders/draw.frag`,
+      ported from the desktop renderer), channel shuffles, destination alpha
+      test, Z aliasing/inversion, AFAIL two-pass alpha fail, fixed-function +
+      software blend split, sprite snapping and seam clamps, clear via a
+      colour-only load-op pass, present via circuit composition + blit to the
+      swapchain (readback always produced for `latchHostPresentationFrame`).
+- [x] Shaders: `gs_vk/shaders/{draw,shuffle,present}.{vert,frag}` compile with
+      the NDK `glslc` (`compile_shaders.cmake`) and embed via
+      `cmake/embed_spirv.cmake` (`gs_vk_spv::Get`). UBOs are std140 blocks
+      matched by static_asserts in the backend.
+- [x] `gs_probe` offscreen tests + harness (`tests/gs_probe/gs_probe.cpp`,
+      `scripts/build-gs-probe.ps1`): self-provisioning (NDK Vulkan headers,
+      glslc, SPIR-V embed) and runs the backend against the SwiftShader ICD.
+      Case clear/sprite/transfer drive init, render-target creation, pipelines
+      and draw dispatch. Pixel-exact expectations do **not** run on this CI VM:
+      both available SwiftShader builds trap (`ud2`) inside their clear/present
+      under `REACTOR_JIT=0`; reported in `VERIFICATION.md`, validation moves to
+      a real device.
+- [x] APK with the Vulkan GS links end to end:
+      `gradlew assembleDebug -Pps2xNullGs=OFF` → **BUILD SUCCESSFUL** (arm64
+      compile of gs_vk + engine, 24 min full), `verify-android.ps1` all pass,
+      79 gs_vk symbols present in `libps2EntryRunner.so`, no `libvulkan`
+      DT_NEEDED (dlopen).
+- [ ] Host lifecycle with `ANativeWindow` (no raylib GL dependency) — window
+      attach/pacing code exists in the host layer; needs on-device exercise.
+- [ ] First pixels from the game; compare against PC OpenGL output (needs a
+      device: the CI VM's software rasterizers are not usable as a reference).
+- [ ] `tests/gs_units` (pure-CPU store/swizzle tests, no Vulkan) — directories
+      are empty; the probe covers device paths instead.
 
 ## M3 — playability
 
@@ -84,14 +113,15 @@ checks. Device bring-up and the Vulkan GS backend remain)._
 
 ## Open TODOs (ordered, for the next session)
 
-1. **Vulkan GS backend** (`android-runner/native/gs_vk/**`): implement
-   `GSVkBackend`, `compile_shaders.cmake`, `sources.cmake`, plus
-   `tests/gs_units` and `tests/gs_probe`; verify the probe offscreen with the
-   SwiftShader ICD (`C:\Program Files\Unity Hub\vk_swiftshader_icd.json`).
-2. **Device bring-up** (user-driven): install, import ISO, logcat, screenshot,
-   `selftest-*.zip`; tune the ~20 FPS menu / ~10 FPS first-area targets. The
-   launcher activity is `com.gow2.android/.MainActivity`; place the ISO via the
-   in-app import or `scripts/push-game-data.ps1`.
+1. **Device bring-up with the Vulkan APK** (user-driven): install
+   `dist/gow2-android-debug.apk`, import the ISO, logcat, screenshot,
+   `selftest-*.zip`. The launcher activity is `com.gow2.android/.MainActivity`;
+   place the ISO via the in-app import or `scripts/push-game-data.ps1`. Fix
+   whatever the Adreno/Mali path disagrees with — SwiftShader could not serve
+   as a pixel reference on the CI VM (see `VERIFICATION.md`).
+2. **Pixel-exact probe cases on a device or a working desktop ICD**: run
+   `gs_probe` (`scripts/build-gs-probe.ps1`) where the Vulkan implementation
+   does not trap; the harness reports per-case verdicts.
 3. **PC capture pass** for native VU1/IOP (`GOW_VU1_CAPTURA`, IOP module dump),
    then `scripts/gen-native.ps1`, then measure the FPS gain on the desktop
    runner before trusting it on the phone.

@@ -90,3 +90,27 @@ build**):
   PC OpenGL renderer; no GL symbols in the Android path.
 - M3: 30 FPS target measured on the reference device; native VU1/IOP generated
   from a PC capture and verified against the interpreter.
+
+## Session 2026-10-31 — M2 implementation build (GSVkBackend, offscreen probe)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Backend written | `android-runner/native/gs_vk/**` | `gs_vk_backend.{h,cpp}` (~2,900 lines), dlopen loader, 6 GLSL→SPIR-V shaders, `sources.cmake`, `compile_shaders.cmake` |
+| Shaders compile | NDK `glslc --target-env=vulkan1.1` | **pass** — 6/6 SPIR-V blobs (draw, shuffle, present) |
+| Probe builds | `.\scripts\build-gs-probe.ps1 -NoRun` | **pass** — backend + engine GS sources + embedded SPIR-V link, exit 0 |
+| Probe device init | `gs_probe clear` with SwiftShader ICD | **pass to draw dispatch** — instance/device/pools/pipelines created, vertex + submission path reached (`CmdDraw` with 6 verts) on the software rasterizer |
+| Probe end-to-end pixels | full `gs_probe` | **blocked on this CI VM** — the available SwiftShader builds (Unity Hub + Chrome 156) hit an internal `ud2` assert in the clear/present path under the interpreter (`REACTOR_JIT=0`); not a validation error the backend can fix |
+| Vulkan GS APK | `gradlew assembleDebug -Pps2xNullGs=OFF` | see below (native arm64 compile of gs_vk + engine) |
+
+Notes:
+
+- The probe harness (`scripts/build-gs-probe.ps1`) self-provisions: copies the
+  NDK Vulkan headers into `gs_vk/_check`, compiles the shaders and embeds the
+  SPIR-V into `gs_vk/_gen`, then compiles the backend against the patched
+  engine sources. Both scratch dirs are gitignored.
+- Early init-order bugs found by the probe and fixed: command buffer/fence/
+  semaphore allocation moved before `createDeviceObjects` (self-submitting
+  upload paths need them), GPU ring creation likewise, target init-clear now
+  ends and submits its command buffer, `GpuRing::alloc` failure is guarded.
+- Real-pixel validation is a device task (TASKS.md M2 bring-up): the software
+  rasterizers on this machine are not a reference for the Adreno/Mali path.

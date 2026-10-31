@@ -88,6 +88,10 @@ if(ANDROID)
         if(TARGET ps2_runtime)
             target_sources(ps2_runtime PRIVATE "${GOW2_SHADER_CPP}")
             target_include_directories(ps2_runtime PUBLIC "${GOW2_GS_VK_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+# gs_vk uses the engine's texture store and GS memory helpers
+target_include_directories(ps2_runtime PRIVATE
+    "${GOW2_REPO_DIR}/PS2Recomp/ps2xRuntime/src/lib/gs"
+    "${GOW2_REPO_DIR}/PS2Recomp/ps2xRuntime/src/lib")
             target_compile_definitions(ps2_runtime PUBLIC PS2X_ANDROID_VULKAN_GS=1)
             # The Vulkan loader is dlopen()ed, so no link dependency (and no API level requirement).
             target_compile_definitions(ps2_runtime PRIVATE VK_USE_PLATFORM_ANDROID_KHR=1)
