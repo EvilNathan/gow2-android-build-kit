@@ -3187,11 +3187,11 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         {
             uint32_t idx = 0;
             VkResult acq = gs_vk::vk.AcquireNextImageKHR(d.device, d.swap.swapchain, 100000000ull, d.swap.acquired, VK_NULL_HANDLE, &idx);
-            if (acq == VK_ERROR_OUT_OF_DATE_KHR || acq == VK_SUBOPTIMAL_KHR)
+            if (acq == VK_ERROR_OUT_OF_DATE_KHR)
             {
                 d.swap.needsRecreate = true;
             }
-            else if (acq == VK_SUCCESS)
+            else if (acq == VK_SUCCESS || acq == VK_SUBOPTIMAL_KHR)
             {
                 d.beginFrameCb();
                 VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -3239,7 +3239,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
                 pi.pSwapchains = &d.swap.swapchain;
                 pi.pImageIndices = &idx;
                 VkResult presRes = gs_vk::vk.QueuePresentKHR(d.queue, &pi);
-                if (presRes == VK_ERROR_OUT_OF_DATE_KHR || presRes == VK_SUBOPTIMAL_KHR)
+                if (presRes == VK_ERROR_OUT_OF_DATE_KHR)
                     d.swap.needsRecreate = true;
 
                 gs_vk::vk.WaitForFences(d.device, 1, &d.frameFence, VK_TRUE, 1000000000ull);
@@ -3390,7 +3390,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
             pi.pSwapchains = &d.swap.swapchain;
             pi.pImageIndices = &idx;
             VkResult presRes = gs_vk::vk.QueuePresentKHR(d.queue, &pi);
-            if (presRes == VK_ERROR_OUT_OF_DATE_KHR || presRes == VK_SUBOPTIMAL_KHR)
+            if (presRes == VK_ERROR_OUT_OF_DATE_KHR)
                 d.swap.needsRecreate = true;
 
             gs_vk::vk.WaitForFences(d.device, 1, &d.frameFence, VK_TRUE, 1000000000ull);

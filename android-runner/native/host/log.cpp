@@ -32,6 +32,10 @@ std::mutex g_logMutex;
 FILE* g_logFile = nullptr;
 char g_logPath[kPathLen] = {0};
 char g_logDir[kPathLen] = {0};
+size_t g_logBytesWritten = 0;
+uint32_t g_linesSinceFlush = 0;
+bool g_capLogged = false;
+constexpr size_t kMaxLogFileBytes = 10 * 1024 * 1024; // 10 MB cap
 
 // "HH:MM:SS.mmm" — never throws, no allocation.
 void FormatClock(char* out, size_t cap)
@@ -92,10 +96,13 @@ int LogcatPriority(const char* tag)
 // Log() body; assumes g_logMutex is held.
 void WriteLineLocked(const char* tag, const char* message)
 {
-    char stamp[24];
-    FormatClock(stamp, sizeof stamp);
     const char* safeTag = (tag != nullptr) ? tag : "host";
     const char* safeMessage = (message != nullptr) ? message : "";
+
+    // Ignore trace spams if any sneak through
+    if (safeMessage[0] == '>' && safeMessage[1] == '>') return;
+    if (safeMessage[0] == '<' && safeMessage[1] == '<') return;
+    if (safeMessage[0] == '\t' && (safeMessage[1] == '>' || safeMessage[1] == '<' || safeMessage[1] == '\t')) return;
 
     detail::LogRingPush(safeMessage);
 
@@ -105,9 +112,30 @@ void WriteLineLocked(const char* tag, const char* message)
 
     if (g_logFile == nullptr)
         return;
+
+    char stamp[24];
+    FormatClock(stamp, sizeof stamp);
     const pid_t tid = ::gettid();
-    std::fprintf(g_logFile, "%s %5d [%s] %s\n", stamp, static_cast<int>(tid), safeTag, safeMessage);
-    std::fflush(g_logFile);
+
+    if (g_logBytesWritten >= kMaxLogFileBytes) {
+        if (!g_capLogged) {
+            g_capLogged = true;
+            std::fprintf(g_logFile, "%s %5d [host] Log size limit (10MB) reached. Suppressing further disk logs.\n",
+                         stamp, static_cast<int>(tid));
+            std::fflush(g_logFile);
+        }
+        return;
+    }
+
+    int written = std::fprintf(g_logFile, "%s %5d [%s] %s\n", stamp, static_cast<int>(tid), safeTag, safeMessage);
+    if (written > 0)
+        g_logBytesWritten += static_cast<size_t>(written);
+
+    const bool isUrgent = (safeTag[0] == 'E' || safeTag[0] == 'W' || std::strstr(safeMessage, "fatal") != nullptr || std::strstr(safeMessage, "crash") != nullptr);
+    if (isUrgent || (++g_linesSinceFlush >= 100)) {
+        std::fflush(g_logFile);
+        g_linesSinceFlush = 0;
+    }
 }
 
 [[noreturn]] void OnTerminate()
@@ -158,19 +186,24 @@ void StartStdioRedirection()
                 char c = buffer[i];
                 if (c == '\n' || c == '\r') {
                     if (!lineBuf.empty()) {
-                        Log("runtime", "%s", lineBuf.c_str());
+                        // Suppress trace logs from stdio
+                        if (lineBuf[0] != '>' && lineBuf[0] != '<' && lineBuf[0] != '\t') {
+                            Log("runtime", "%s", lineBuf.c_str());
+                        }
                         lineBuf.clear();
                     }
                 } else {
                     lineBuf += c;
                     if (lineBuf.size() >= 512) {
-                        Log("runtime", "%s", lineBuf.c_str());
+                        if (lineBuf[0] != '>' && lineBuf[0] != '<' && lineBuf[0] != '\t') {
+                            Log("runtime", "%s", lineBuf.c_str());
+                        }
                         lineBuf.clear();
                     }
                 }
             }
         }
-        if (!lineBuf.empty()) {
+        if (!lineBuf.empty() && lineBuf[0] != '>' && lineBuf[0] != '<' && lineBuf[0] != '\t') {
             Log("runtime", "%s", lineBuf.c_str());
         }
     });
@@ -211,6 +244,9 @@ void StartLog(const char* directory)
                 std::snprintf(g_logPath, sizeof g_logPath, "%s/gow2.log", g_logDir);
                 g_logFile = std::fopen(g_logPath, "w");
             }
+            g_logBytesWritten = 0;
+            g_linesSinceFlush = 0;
+            g_capLogged = false;
         }
 
         std::set_terminate(OnTerminate);
