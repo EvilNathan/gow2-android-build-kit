@@ -482,8 +482,16 @@ struct GSVkBackend::Impl
     void drawCircuit(VkImageView src, uint32_t cdbx, uint32_t cdby, bool ct24, bool alphaFactor, uint32_t srcEdge, bool blendOver,
                      uint32_t pmode, bool mmod, uint32_t alp);
 
-    void trash(void *obj, bool isMemory);
-    std::vector<std::pair<void *, bool>> trash_;
+    struct TrashResource
+    {
+        VkImage image = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        VkBuffer buffer = VK_NULL_HANDLE;
+    };
+    std::vector<TrashResource> trash_;
+    void trashTexture(Texture &tex);
+    void trashBuffer(VkBuffer buf, VkDeviceMemory mem = VK_NULL_HANDLE);
     void emptyTrash();
 };
 
@@ -944,7 +952,9 @@ bool GSVkBackend::Impl::createDeviceObjects()
         // present image: one colour attachment, also bound as input attachment
         // (descriptor set layout is shared with the draw program), no depth
         VkAttachmentDescription atts[1] = {attColor};
+        atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        atts[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         VkSubpassDescription psub{};
         psub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
         psub.colorAttachmentCount = 1;
@@ -1207,6 +1217,9 @@ void GSVkBackend::Impl::submitAndWait()
     gs_vk::vk.WaitForFences(device, 1, &frameFence, VK_TRUE, 1000000000ull);
     gs_vk::vk.ResetCommandBuffer(frameCb, 0);
     gs_vk::vk.ResetCommandPool(device, cmdPool, 0);
+    if (descPool && gs_vk::vk.ResetDescriptorPool)
+        gs_vk::vk.ResetDescriptorPool(device, descPool, 0);
+    rings.reset();
     emptyTrash();
 }
 
@@ -1218,19 +1231,36 @@ void GSVkBackend::Impl::globalBarrier()
     gs_vk::vk.CmdPipelineBarrier(frameCb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &bar, 0, nullptr, 0, nullptr);
 }
 
-void GSVkBackend::Impl::trash(void *obj, bool isMemory)
+void GSVkBackend::Impl::trashTexture(Texture &tex)
 {
-    trash_.emplace_back(obj, isMemory);
+    if (tex.image || tex.view || tex.mem)
+    {
+        trash_.push_back({tex.image, tex.view, tex.mem, VK_NULL_HANDLE});
+        tex.image = VK_NULL_HANDLE;
+        tex.view = VK_NULL_HANDLE;
+        tex.mem = VK_NULL_HANDLE;
+    }
+    tex.valid = false;
+}
+
+void GSVkBackend::Impl::trashBuffer(VkBuffer buf, VkDeviceMemory mem)
+{
+    if (buf || mem)
+        trash_.push_back({VK_NULL_HANDLE, VK_NULL_HANDLE, mem, buf});
 }
 
 void GSVkBackend::Impl::emptyTrash()
 {
-    for (auto &[obj, isMemory] : trash_)
+    for (const auto &item : trash_)
     {
-        if (isMemory)
-            gs_vk::vk.FreeMemory(device, reinterpret_cast<VkDeviceMemory>(obj), nullptr);
-        else
-            gs_vk::vk.DestroyBuffer(device, reinterpret_cast<VkBuffer>(obj), nullptr);
+        if (item.view)
+            gs_vk::vk.DestroyImageView(device, item.view, nullptr);
+        if (item.image)
+            gs_vk::vk.DestroyImage(device, item.image, nullptr);
+        if (item.buffer)
+            gs_vk::vk.DestroyBuffer(device, item.buffer, nullptr);
+        if (item.mem)
+            gs_vk::vk.FreeMemory(device, item.mem, nullptr);
     }
     trash_.clear();
 }
@@ -1347,13 +1377,13 @@ GSVkBackend::Impl::RenderTarget *GSVkBackend::Impl::findTarget(uint32_t fbp)
 
 GSVkBackend::Impl::RenderTarget &GSVkBackend::Impl::target(uint32_t fbp, uint32_t fbw)
 {
-    std::fprintf(stderr, "[gs-vk] target(%u,%u)\n", fbp, fbw);
     for (const auto &t : targets)
         if (t && t->fbp == fbp && t->fbw >= fbw)
             return *t;
     for (const auto &t : targets)
         if (t && t->fbp == fbp)
         {
+            submitAndWait();
             destroyTarget(*t);
             createTarget(*t, fbp, fbw);
             return *t;
@@ -1496,11 +1526,7 @@ GSVkBackend::Impl::Texture &GSVkBackend::Impl::uploadTexture(uint64_t key, uint3
     if (tex.image)
     {
         // stale image: recreate (size may have changed)
-        trash(tex.image, false);
-        trash(tex.mem, true);
-        tex.image = VK_NULL_HANDLE;
-        tex.mem = VK_NULL_HANDLE;
-        tex.view = VK_NULL_HANDLE;
+        trashTexture(tex);
     }
     const VkDeviceSize bytes = singleByte ? static_cast<VkDeviceSize>(w) * h : static_cast<VkDeviceSize>(w) * h * 4;
     auto a = staging.alloc(bytes, 16);
@@ -1656,11 +1682,7 @@ GSVkBackend::Impl::Texture &GSVkBackend::Impl::paletteFor(const GSDrawState &s)
     if (palettes.size() > 4096u)
     {
         for (auto &kv : palettes)
-            if (kv.second.image)
-            {
-                trash(kv.second.image, false);
-                trash(kv.second.mem, true);
-            }
+            trashTexture(kv.second);
         palettes.clear();
     }
     const uint64_t key = paletteKey();
@@ -1679,10 +1701,7 @@ void GSVkBackend::Impl::evictOld()
     {
         if (it->second.valid && it->second.lastUse + 3000u < useCounter)
         {
-            if (it->second.image)
-                trash(it->second.image, false);
-            if (it->second.mem)
-                trash(it->second.mem, true);
+            trashTexture(it->second);
             it = textures.erase(it);
         }
         else
@@ -2241,19 +2260,6 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
     if (softBlend || zAliasWrite)
         blend = false;
 
-    // descriptor set
-    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    dai.descriptorPool = descPool;
-    dai.descriptorSetCount = 1;
-    dai.pSetLayouts = &drawSetLayout;
-    VkDescriptorSet dsc = VK_NULL_HANDLE;
-    if (gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc) != VK_SUCCESS)
-    {
-        submitAndWait();
-        dai.descriptorPool = descPool;
-        gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc);
-    }
-
     // UBO (local value; copied to the ring once its final offset is known)
     DrawUbo u{};
     u.uInvSize[0] = 1.0f / rt.pxW; u.uInvSize[1] = 1.0f / rt.pxH;
@@ -2460,18 +2466,25 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
     u.uAref = static_cast<int32_t>(aref);
     u.uPass = ate ? 1 : 0;
 
-    // vertices + UBO in the ring (final offsets before the descriptors are written)
+    // vertices + UBO in the ring, and descriptor set allocation
     const VkDeviceSize vbytes = dverts.size() * sizeof(HwVertex);
     auto valloc = rings.alloc(vbytes, 16);
     auto ubo = rings.alloc(sizeof(DrawUbo), 256);
-    if (!valloc.cpu || !ubo.cpu)
+    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dai.descriptorPool = descPool;
+    dai.descriptorSetCount = 1;
+    dai.pSetLayouts = &drawSetLayout;
+    VkDescriptorSet dsc = VK_NULL_HANDLE;
+    VkResult dscRes = gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc);
+    if (!valloc.cpu || !ubo.cpu || dscRes != VK_SUCCESS)
     {
         submitAndWait();
-        rings.reset();
-        staging.reset();
+        beginFrameCb();
         valloc = rings.alloc(vbytes, 16);
         ubo = rings.alloc(sizeof(DrawUbo), 256);
-        if (!valloc.cpu || !ubo.cpu)
+        dai.descriptorPool = descPool;
+        gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc);
+        if (!valloc.cpu || !ubo.cpu || !dsc)
             return;
     }
     std::memcpy(valloc.cpu, dverts.data(), vbytes);
@@ -2523,6 +2536,7 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
     VkDeviceSize voff = valloc.offset;
     const auto recordPass = [&](bool pass2)
     {
+        beginFrameCb();
         VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
         rb.renderPass = rpDraw;
         rb.framebuffer = rt.fb;
@@ -2754,16 +2768,6 @@ void GSVkBackend::Impl::flushShuffle()
     const uint32_t hi = (m16 & 0xFF00u) == 0u ? (VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT) : 0u;
 
     beginFrameCb();
-    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    dai.descriptorPool = descPool;
-    dai.descriptorSetCount = 1;
-    dai.pSetLayouts = &drawSetLayout;
-    VkDescriptorSet dsc = VK_NULL_HANDLE;
-    if (gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc) != VK_SUCCESS)
-    {
-        submitAndWait();
-        gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc);
-    }
     VkImageView srcView = shuffleSrcZ ? src.depthSampled : src.colorSampled;
     VkDescriptorImageInfo srcInfo{nearestSampler, srcView, shuffleSrcZ ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo destInfo{VK_NULL_HANDLE, dst.colorInput, VK_IMAGE_LAYOUT_GENERAL};
@@ -2778,13 +2782,28 @@ void GSVkBackend::Impl::flushShuffle()
         if (q.empty())
             continue;
         const uint32_t hs = i >> 1, hd = i & 1u;
+        const VkDeviceSize vbytes = q.size() * sizeof(ShuffleVertex);
         auto ubo = rings.alloc(sizeof(ShuffleUbo), 256);
-        if (!ubo.cpu)
+        auto valloc = rings.alloc(vbytes, 16);
+        VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        dai.descriptorPool = descPool;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &drawSetLayout;
+        VkDescriptorSet dsc = VK_NULL_HANDLE;
+        VkResult dscRes = gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc);
+        if (!ubo.cpu || !valloc.cpu || dscRes != VK_SUCCESS)
         {
             submitAndWait();
-            rings.reset();
-            staging.reset();
+            beginFrameCb();
             ubo = rings.alloc(sizeof(ShuffleUbo), 256);
+            valloc = rings.alloc(vbytes, 16);
+            dai.descriptorPool = descPool;
+            gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc);
+            if (!ubo.cpu || !valloc.cpu || !dsc)
+            {
+                q.clear();
+                continue;
+            }
         }
         ShuffleUbo u{};
         u.uInvSize[0] = 1.0f / dst.pxW;
@@ -2811,24 +2830,11 @@ void GSVkBackend::Impl::flushShuffle()
         };
         gs_vk::vk.UpdateDescriptorSets(device, 7, writes, 0, nullptr);
 
-        const VkDeviceSize vbytes = q.size() * sizeof(ShuffleVertex);
-        auto valloc = rings.alloc(vbytes, 16);
-        if (!valloc.cpu)
-        {
-            submitAndWait();
-            rings.reset();
-            staging.reset();
-            valloc = rings.alloc(vbytes, 16);
-            if (!valloc.cpu)
-            {
-                q.clear();
-                continue;
-            }
-        }
         std::memcpy(valloc.cpu, q.data(), vbytes);
         const uint32_t vertexCount = static_cast<uint32_t>(q.size());
         q.clear();
 
+        beginFrameCb();
         VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
         rb.renderPass = rpDraw;
         rb.framebuffer = dst.fb;
@@ -2959,14 +2965,13 @@ void GSVkBackend::Impl::drawCircuit(VkImageView src, uint32_t cdbx, uint32_t cdb
     dai.descriptorSetCount = 1;
     dai.pSetLayouts = &drawSetLayout;
     VkDescriptorSet dsc = VK_NULL_HANDLE;
-    gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc);
     auto ubo = rings.alloc(sizeof(PresentUbo), 256);
-    if (!ubo.cpu)
+    if (!ubo.cpu || gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc) != VK_SUCCESS)
     {
         submitAndWait();
-        rings.reset();
-        staging.reset();
+        beginFrameCb();
         ubo = rings.alloc(sizeof(PresentUbo), 256);
+        dai.descriptorPool = descPool;
         gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc);
     }
     PresentUbo u{};
@@ -2996,7 +3001,7 @@ void GSVkBackend::Impl::drawCircuit(VkImageView src, uint32_t cdbx, uint32_t cdb
 
     PipelineKey key{};
     key.program = Program::Present;
-    key.writeMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    key.writeMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT;
     key.srcAlpha = key.dstAlpha = VK_BLEND_FACTOR_ONE;
     if (blendOver)
     {
@@ -3190,6 +3195,13 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
 
     if (!ok1 && !ok2)
     {
+        if (d.presentCount <= 10 || (d.presentCount % 60) == 0)
+        {
+            ps2x::host::Log("host/gs-vk", "Frame %d blank (pmode=0x%llx dispfb1=0x%llx display1=0x%llx dispfb2=0x%llx display2=0x%llx)",
+                            d.presentCount, (unsigned long long)request.pmode,
+                            (unsigned long long)request.dispfb1, (unsigned long long)request.display1,
+                            (unsigned long long)request.dispfb2, (unsigned long long)request.display2);
+        }
         // When circuits are not active yet, present a blank frame so the swapchain ticks and
         // the surface is visibly attached to the Vulkan queue.
         if (d.swap.ok)
@@ -3214,6 +3226,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
                     bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
                     gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
                     VkClearColorValue black{};
+                    black.float32[3] = 1.0f;
                     gs_vk::vk.CmdClearColorImage(d.frameCb, d.swap.images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &bar.subresourceRange);
                     VkImageMemoryBarrier bar2 = bar;
                     bar2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -3367,6 +3380,16 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
             gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
             if (d.swap.canBlit)
             {
+                VkImageMemoryBarrier pbar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                pbar.image = d.presentImage;
+                pbar.srcQueueFamilyIndex = pbar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                pbar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                pbar.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                pbar.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                pbar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+                pbar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &pbar);
+
                 VkImageBlit blit{};
                 blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
                 blit.srcOffsets[1] = {static_cast<int32_t>(outW), static_cast<int32_t>(outH), 1};
@@ -3408,7 +3431,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
             d.cbOpen = false;
             d.emptyTrash();
 
-            if ((d.presentCount % 300) == 1)
+            if (d.presentCount <= 10 || (d.presentCount % 60) == 0)
             {
                 ps2x::host::Log("host/gs-vk", "Frame %d presented OK (%ux%u -> %ux%u)",
                                 d.presentCount, outW, outH, d.swap.width, d.swap.height);

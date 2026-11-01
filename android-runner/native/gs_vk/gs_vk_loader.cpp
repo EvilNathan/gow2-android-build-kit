@@ -185,6 +185,7 @@ namespace gs_vk
         GSVK_LOAD(FreeDescriptorSets);
         GSVK_LOAD(UpdateDescriptorSets);
         GSVK_LOAD(CreateDescriptorPool);
+        GSVK_LOAD(ResetDescriptorPool);
         GSVK_LOAD(DestroyDescriptorPool);
         GSVK_LOAD(CmdPipelineBarrier);
         GSVK_LOAD(CmdCopyBuffer);

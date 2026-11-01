@@ -99,6 +99,7 @@ namespace gs_vk
         PFN_vkFreeDescriptorSets FreeDescriptorSets = nullptr;
         PFN_vkUpdateDescriptorSets UpdateDescriptorSets = nullptr;
         PFN_vkCreateDescriptorPool CreateDescriptorPool = nullptr;
+        PFN_vkResetDescriptorPool ResetDescriptorPool = nullptr;
         PFN_vkDestroyDescriptorPool DestroyDescriptorPool = nullptr;
         PFN_vkCmdPipelineBarrier CmdPipelineBarrier = nullptr;
         PFN_vkCmdCopyBuffer CmdCopyBuffer = nullptr;
