@@ -195,6 +195,22 @@ When inspecting, generating, or modifying code in this repository, you **MUST** 
 * **No Stale Local Commits**: Do not leave completed work uncommitted or unpushed across session boundaries.
 * **Clean Tree Verification**: Before pushing, ensure the working tree is clean and that no prohibited artifacts (game ISOs, ELFs, build outputs in `dist/`, `build/`, `games/`, or `generated/`) are staged or tracked.
 
+### 9. Private APK Release & Distribution Policy (`EvilNathan/gow2-android-apk`)
+* **Strict Repository Separation**: Compiled APK deliverables (`*.apk`) must **NEVER** be committed, staged, or pushed to the public build-kit repository (`gow2-android-build-kit`).
+* **Private APK Archive**: Built APKs are distributed exclusively through the private repository [`EvilNathan/gow2-android-apk`](https://github.com/EvilNathan/gow2-android-apk) via GitHub Releases.
+* **Release Procedure**:
+  1. Build the APK: `.\scripts\build-android.ps1 -Configuration Debug` (or Release).
+  2. Run static verification: `.\scripts\verify-android.ps1` (ensure all 10 checks pass, including 16 KB page-alignment).
+  3. Publish release with `gh cli`:
+     ```powershell
+     gh release create <tag> .\dist\gow2-android-<config>.apk `
+         --repo EvilNathan/gow2-android-apk `
+         --title "<title>" `
+         --notes "<detailed_changelog>"
+     ```
+  4. **Tag Convention**: Format tags as `v<major>.<minor>.<patch>-m<milestone>` (e.g. `v0.4.0-m2`).
+
+
 
 ---
 

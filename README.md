@@ -30,7 +30,7 @@ remains is device work: boot, pixels, input, audio, performance.
 
 Current deliverable: `gow2-android-debug.apk` (56 MB, arm64-v8a, Vulkan GS) —
 also published as
-[`v0.3.0-m2`](https://github.com/EvilNathan/gow2-android-apk/releases/tag/v0.3.0-m2)
+[`v0.4.0-m2`](https://github.com/EvilNathan/gow2-android-apk/releases/tag/v0.4.0-m2)
 in the private APK archive.
 
 ## Requirements
