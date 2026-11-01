@@ -19,6 +19,7 @@ project or a GitHub account.
 | OpenCode | SST | Build-kit pipeline, patch rebasing, verification scripts, docs |
 | Codex | OpenAI | Code review and build fixes |
 | DeepSeek | DeepSeek | Recompiler pipeline checks and documentation |
+| Antigravity | Google DeepMind | Architecture documentation, AGENTS.md, workflow governance |
 
 ## Upstream
 
