@@ -332,6 +332,10 @@ void ApplySettingsJson(const char* json)
     SetEnvVar("PS2X_LOG_LEVEL", logLevel != nullptr ? *logLevel : std::string("info"));
     SetEnvVar("GOW_VSYNC", SettingBool(settings, "vsync", true) ? std::string("1") : std::string("0"));
     SetEnvVar("GOW2_ISO_URI", isoUri != nullptr ? *isoUri : std::string());
+    const std::string* isoPath = FindSetting(settings, "isoPath");
+    if (isoPath != nullptr && !isoPath->empty()) {
+        SetEnvVar("GOW2_ISO", *isoPath);
+    }
     SetEnvVar("GOW_PERF_DIAG", std::string("1"));
 }
 

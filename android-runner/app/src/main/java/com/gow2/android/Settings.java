@@ -33,6 +33,10 @@ public final class Settings {
     public String padScript = "";
     /** Informational: the SAF URI the user picked, kept so re-imports are possible. */
     public String isoUri = "";
+    /** Custom ISO file path (direct play or /sdcard/gow2). If empty, defaults to gow2.iso in app files dir. */
+    public String isoPath = "";
+    /** Source of the active ISO: "direct", "sdcard", "imported", or "auto". */
+    public String isoSource = "auto";
     public String logLevel = LOG_INFO;
     public float touchScale = 1.0f;
     public float touchOpacity = 0.6f;
@@ -51,6 +55,8 @@ public final class Settings {
         other.volume = volume;
         other.padScript = padScript;
         other.isoUri = isoUri;
+        other.isoPath = isoPath;
+        other.isoSource = isoSource;
         other.logLevel = logLevel;
         other.touchScale = touchScale;
         other.touchOpacity = touchOpacity;
@@ -91,10 +97,16 @@ public final class Settings {
         if (isoUri == null) {
             isoUri = "";
         }
+        if (isoPath == null) {
+            isoPath = "";
+        }
+        if (isoSource == null) {
+            isoSource = "auto";
+        }
     }
 
     public String toJson() {
-        StringBuilder json = new StringBuilder(320);
+        StringBuilder json = new StringBuilder(380);
         json.append('{');
         appendFloat(json, "scale", scale).append(',');
         appendString(json, "aspect", aspect).append(',');
@@ -103,6 +115,8 @@ public final class Settings {
         appendFloat(json, "volume", volume).append(',');
         appendString(json, "padScript", padScript).append(',');
         appendString(json, "isoUri", isoUri).append(',');
+        appendString(json, "isoPath", isoPath).append(',');
+        appendString(json, "isoSource", isoSource).append(',');
         appendString(json, "logLevel", logLevel).append(',');
         appendFloat(json, "touchScale", touchScale).append(',');
         appendFloat(json, "touchOpacity", touchOpacity).append(',');
@@ -126,6 +140,8 @@ public final class Settings {
             settings.volume = (float) object.optDouble("volume", settings.volume);
             settings.padScript = object.optString("padScript", settings.padScript);
             settings.isoUri = object.optString("isoUri", settings.isoUri);
+            settings.isoPath = object.optString("isoPath", settings.isoPath);
+            settings.isoSource = object.optString("isoSource", settings.isoSource);
             settings.logLevel = object.optString("logLevel", settings.logLevel);
             settings.touchScale = (float) object.optDouble("touchScale", settings.touchScale);
             settings.touchOpacity = (float) object.optDouble("touchOpacity", settings.touchOpacity);

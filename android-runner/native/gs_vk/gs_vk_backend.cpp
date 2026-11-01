@@ -3044,12 +3044,26 @@ void GSVkBackend::Impl::ensureSwapchain()
     swap.format = (formats[0].format == VK_FORMAT_UNDEFINED) ? VK_FORMAT_R8G8B8A8_UNORM : formats[0].format;
     VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     ci.surface = swap.surface;
-    ci.minImageCount = std::max(2u, caps.minImageCount);
+    uint32_t minCount = std::max(2u, caps.minImageCount);
+    if (caps.maxImageCount > 0 && minCount > caps.maxImageCount)
+        minCount = caps.maxImageCount;
+    ci.minImageCount = minCount;
     ci.imageFormat = swap.format;
     ci.imageColorSpace = formats[0].colorSpace;
-    ci.imageExtent = caps.currentExtent;
+
+    VkExtent2D extent = caps.currentExtent;
+    if (extent.width == 0xFFFFFFFF || extent.width == 0)
+    {
+        uint32_t w = sw > 0 ? static_cast<uint32_t>(sw) : 1280u;
+        uint32_t h = sh > 0 ? static_cast<uint32_t>(sh) : 720u;
+        extent.width = std::max(caps.minImageExtent.width, std::min(caps.maxImageExtent.width, w));
+        extent.height = std::max(caps.minImageExtent.height, std::min(caps.maxImageExtent.height, h));
+    }
+    ci.imageExtent = extent;
     ci.imageArrayLayers = 1;
-    ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ci.imageUsage = (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+                        ? VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                        : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -3064,8 +3078,8 @@ void GSVkBackend::Impl::ensureSwapchain()
     gs_vk::vk.GetSwapchainImagesKHR(device, swap.swapchain, &n, nullptr);
     swap.images.resize(n);
     gs_vk::vk.GetSwapchainImagesKHR(device, swap.swapchain, &n, swap.images.data());
-    swap.width = caps.currentExtent.width;
-    swap.height = caps.currentExtent.height;
+    swap.width = extent.width;
+    swap.height = extent.height;
     swap.ok = true;
     std::fprintf(stderr, "[gs-vk] swapchain %ux%u fmt=%d images=%zu\n", swap.width, swap.height, static_cast<int>(swap.format), swap.images.size());
 #else

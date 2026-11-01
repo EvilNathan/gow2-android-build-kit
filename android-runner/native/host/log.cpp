@@ -126,22 +126,33 @@ void StartLog(const char* directory)
     try {
         {
             std::lock_guard<std::mutex> lock(g_logMutex);
-            if (directory != nullptr && directory[0] != '\0') {
-                std::snprintf(g_logDir, sizeof g_logDir, "%s/logs", directory);
-            } else {
-                std::snprintf(g_logDir, sizeof g_logDir, ".");
-            }
-            EnsureDirectory(g_logDir);
-
             if (g_logFile != nullptr) {
-                // Idempotent: keep the first session file.
+                // Idempotent: keep the active session file.
                 return;
             }
 
-            char stamp[32];
-            FormatFileStamp(stamp, sizeof stamp);
-            std::snprintf(g_logPath, sizeof g_logPath, "%s/session-%s.log", g_logDir, stamp);
-            g_logFile = std::fopen(g_logPath, "a");
+            // Prefer /sdcard/gow2/logs if external storage is accessible
+            const char* externalGow2Logs = "/sdcard/gow2/logs";
+            EnsureDirectory(externalGow2Logs);
+
+            char testPath[kPathLen];
+            std::snprintf(testPath, sizeof testPath, "%s/gow2.log", externalGow2Logs);
+            FILE* testFile = std::fopen(testPath, "w");
+            if (testFile != nullptr) {
+                std::snprintf(g_logDir, sizeof g_logDir, "%s", externalGow2Logs);
+                std::snprintf(g_logPath, sizeof g_logPath, "%s", testPath);
+                g_logFile = testFile;
+            } else {
+                // Fallback to app directory/logs
+                if (directory != nullptr && directory[0] != '\0') {
+                    std::snprintf(g_logDir, sizeof g_logDir, "%s/logs", directory);
+                } else {
+                    std::snprintf(g_logDir, sizeof g_logDir, ".");
+                }
+                EnsureDirectory(g_logDir);
+                std::snprintf(g_logPath, sizeof g_logPath, "%s/gow2.log", g_logDir);
+                g_logFile = std::fopen(g_logPath, "w");
+            }
         }
 
         std::set_terminate(OnTerminate);

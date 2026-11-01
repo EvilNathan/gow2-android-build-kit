@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer Greek border ring -->
+    <path
+        android:strokeColor="#55D4AF37"
+        android:strokeWidth="1.5"
+        android:fillColor="#00000000"
+        android:pathData="M54,20 A34,34 0 1,0 54,88 A34,34 0 1,0 54,20 Z" />
+
+    <!-- God of War Omega Symbol -->
+    <!-- Left base foot -->
+    <path
+        android:fillColor="#E5A93B"
+        android:pathData="M30,76 L44,76 L42,70 L34,70 L34,68 C34,68 31,68 30,76 Z" />
+    <!-- Right base foot -->
+    <path
+        android:fillColor="#E5A93B"
+        android:pathData="M64,70 L74,70 L78,76 L64,76 L66,70 Z" />
+    <!-- Main Omega Arch -->
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M42,70 C36,64 34,55 34,48 C34,37 43,28 54,28 C65,28 74,37 74,48 C74,55 72,64 66,70 L60,65 C64,60 66,54 66,48 C66,41 61,35 54,35 C47,35 42,41 42,48 C42,54 44,60 48,65 Z" />
+    <!-- Inner Crimson / Blade Accent -->
+    <path
+        android:fillColor="#C41E3A"
+        android:pathData="M51,32 L57,32 L55,58 L53,58 Z" />
+    <path
+        android:fillColor="#E63946"
+        android:pathData="M48,52 L60,52 L54,62 Z" />
+    <!-- Roman Numeral II for God of War II -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M50,71 L52,71 L52,79 L50,79 Z M56,71 L58,71 L58,79 L56,79 Z" />
+</vector>

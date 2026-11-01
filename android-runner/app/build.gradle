@@ -4,7 +4,7 @@ plugins {
 
 // Files pushed by scripts/install-android-tools.ps1 / build-android.ps1.
 def ps2xBootElfName = project.findProperty('ps2xBootElfName') ?: 'SCUS_974.81'
-def ps2xNullGs = (project.findProperty('ps2xNullGs') ?: 'ON').toString().toUpperCase()
+def ps2xNullGs = (project.findProperty('ps2xNullGs') ?: 'OFF').toString().toUpperCase()
 def ps2xGsVk = (project.findProperty('ps2xGsVk') ?: 'ON').toString().toUpperCase()
 def ps2xNativeVu1Dir = project.findProperty('ps2xNativeVu1Dir') ?: ''
 def appId = 'com.gow2.android'

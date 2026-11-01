@@ -1,7 +1,7 @@
 param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
     [string]$BootElfName = '',
-    [bool]$NullGs = $true,
+    [bool]$NullGs = $false,
     [switch]$Clean,
     [switch]$Install
 )

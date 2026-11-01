@@ -148,6 +148,34 @@ public final class DiscInstaller {
         return -1;
     }
 
+    /** Attempts to resolve a direct filesystem path from a Uri. Returns null if not resolvable. */
+    public static String resolvePathFromUri(Context context, Uri uri) {
+        if (uri == null) {
+            return null;
+        }
+        if ("file".equalsIgnoreCase(uri.getScheme())) {
+            return uri.getPath();
+        }
+        if ("content".equalsIgnoreCase(uri.getScheme())) {
+            try {
+                String authority = uri.getAuthority();
+                if ("com.android.externalstorage.documents".equals(authority)) {
+                    String docId = android.provider.DocumentsContract.getDocumentId(uri);
+                    String[] split = docId.split(":");
+                    if (split.length >= 2 && "primary".equalsIgnoreCase(split[0])) {
+                        String path = "/storage/emulated/0/" + split[1];
+                        File f = new File(path);
+                        if (f.exists() && f.canRead()) {
+                            return path;
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
+    }
+
     /** Human readable byte count for the launcher UI. */
     public static String formatBytes(long bytes) {
         if (bytes < 0) {

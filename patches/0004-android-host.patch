@@ -2,7 +2,7 @@ diff --git a/ps2xRuntime/src/lib/ps2_android_runtime.cpp b/ps2xRuntime/src/lib/p
 index 40e3dea..9a36cf9 100644
 --- a/ps2xRuntime/src/lib/ps2_android_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_android_runtime.cpp
-@@ -1,3 +1,76 @@
+@@ -1,3 +1,75 @@
 -// TODO: on-screen touch joystick / button overlay.
 +// Kit: Android game entry point. The Java host starts this on its own thread from
 +// NativeBridge.nativeStart(); the engine's desktop main() is not used on Android.
@@ -37,7 +37,6 @@ index 40e3dea..9a36cf9 100644
 +
 +extern "C" int ps2x_android_game_main(void)
 +{
-+    ps2x::host::RequestExit(); // clear a pending exit from a previous session
 +    const std::string filePathStr = bootElfPath();
 +    if (filePathStr.empty())
 +    {

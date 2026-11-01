@@ -45,6 +45,61 @@ public final class SettingsStore {
         return new File(filesDir(context), ISO_NAME);
     }
 
+    public static File sdcardGow2Dir() {
+        return new File("/sdcard/gow2");
+    }
+
+    /** Finds God of War II ISO in /sdcard/gow2 if present. */
+    public static File findSdcardIso() {
+        File dir = sdcardGow2Dir();
+        if (!dir.exists() || !dir.isDirectory()) {
+            dir = new File("/storage/emulated/0/gow2");
+        }
+        if (!dir.exists() || !dir.isDirectory()) {
+            return null;
+        }
+
+        // Priority 1: gow2.iso
+        File direct = new File(dir, ISO_NAME);
+        if (direct.isFile() && direct.canRead() && direct.length() > 100 * 1024 * 1024L) {
+            return direct;
+        }
+
+        // Priority 2: God of War II.iso or any .iso file
+        File[] files = dir.listFiles((d, name) -> name.toLowerCase(java.util.Locale.US).endsWith(".iso"));
+        if (files != null && files.length > 0) {
+            for (File f : files) {
+                if (f.isFile() && f.canRead() && f.length() > 100 * 1024 * 1024L) {
+                    return f;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Resolves the active ISO file based on explicit setting, /sdcard/gow2, or imported file.
+     */
+    public static File resolveEffectiveIso(Context context, Settings settings) {
+        if (settings != null && settings.isoPath != null && !settings.isoPath.isEmpty()) {
+            File custom = new File(settings.isoPath);
+            if (custom.isFile() && custom.canRead() && custom.length() > 100 * 1024 * 1024L) {
+                return custom;
+            }
+        }
+        // Check /sdcard/gow2
+        File sdcardIso = findSdcardIso();
+        if (sdcardIso != null) {
+            return sdcardIso;
+        }
+        // Check app files dir (imported)
+        File imported = isoFile(context);
+        if (imported.isFile() && imported.canRead() && imported.length() > 100 * 1024 * 1024L) {
+            return imported;
+        }
+        return null;
+    }
+
     public static File bootElfFile(Context context) {
         return new File(filesDir(context), BOOT_ELF_NAME);
     }
