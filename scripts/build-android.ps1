@@ -9,9 +9,15 @@ param(
 . (Join-Path $PSScriptRoot '_common.ps1')
 Ensure-Engine
 Apply-EnginePatches
+Sync-RunnerSources
 
 if (-not (Test-Path $RunnerSrcDir) -or -not (Get-ChildItem $RunnerSrcDir -Filter '*.cpp' -File -ErrorAction SilentlyContinue)) {
     throw 'PS2Recomp/ps2xRuntime/src/runner is empty. Run .\scripts\recompile.ps1 first.'
+}
+
+$regFuncs = Join-Path $RunnerSrcDir 'register_functions.cpp'
+if (-not (Test-Path $regFuncs) -or (Get-Item $regFuncs).Length -lt 10000) {
+    throw "PS2Recomp/ps2xRuntime/src/runner/register_functions.cpp is missing or is an empty stub. Run .\scripts\recompile.ps1."
 }
 
 if (-not $BootElfName) {

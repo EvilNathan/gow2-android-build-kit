@@ -162,6 +162,59 @@ function Apply-EnginePatches {
         Invoke-Native git @('-C', $RecompDir, 'apply', '--ignore-whitespace', $patch.FullName)
         Write-Host "  applied $($patch.Name)"
     }
+
+    if (Test-Path (Join-Path $GeneratedDir 'register_functions.cpp')) {
+        Sync-RunnerSources
+    }
+}
+
+function Sync-RunnerSources {
+    if (-not (Test-Path $GeneratedDir) -or -not (Get-ChildItem $GeneratedDir -Filter '*.cpp' -File -ErrorAction SilentlyContinue)) {
+        Write-Warning "generated/ is empty ($GeneratedDir). Run .\scripts\recompile.ps1 first."
+        return
+    }
+
+    Write-Step 'Syncing generated code and overrides'
+    New-Item -ItemType Directory -Force (Split-Path $SyncManifest) | Out-Null
+    New-Item -ItemType Directory -Force $RunnerSrcDir | Out-Null
+
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    $testSameContent = {
+        param([string]$a, [string]$b)
+        $fa = Get-Item -LiteralPath $a
+        $fb = Get-Item -LiteralPath $b -ErrorAction SilentlyContinue
+        if (-not $fb -or $fa.Length -ne $fb.Length) { return $false }
+        $ha = $md5.ComputeHash([IO.File]::ReadAllBytes($a))
+        $hb = $md5.ComputeHash([IO.File]::ReadAllBytes($b))
+        return [Convert]::ToBase64String($ha) -eq [Convert]::ToBase64String($hb)
+    }
+
+    $copied = New-Object System.Collections.Generic.List[string]
+    $changed = 0
+    $sources = @(Get-ChildItem $GeneratedDir -File) +
+               @(Get-ChildItem $OverridesDir -File | Where-Object { $_.Extension -in '.cpp', '.h' })
+    foreach ($file in $sources) {
+        $dest = Join-Path $RunnerSrcDir $file.Name
+        if (-not (& $testSameContent $file.FullName $dest)) {
+            Copy-Item $file.FullName $dest -Force
+            (Get-Item $dest).LastWriteTime = Get-Date
+            $changed++
+        }
+        $copied.Add($dest)
+    }
+    $removed = 0
+    if (Test-Path $SyncManifest) {
+        $current = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach ($path in $copied) { [void]$current.Add($path) }
+        foreach ($old in (Get-Content $SyncManifest)) {
+            if ($old -and -not $current.Contains($old) -and (Test-Path -LiteralPath $old)) {
+                Remove-Item -LiteralPath $old -Force
+                $removed++
+            }
+        }
+    }
+    Set-Content -Path $SyncManifest -Value $copied -Encoding utf8
+    Write-Host "Runner: $($copied.Count) files, $changed updated, $removed removed."
 }
 
 function Get-Adb {

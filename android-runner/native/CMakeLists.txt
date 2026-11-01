@@ -55,12 +55,31 @@ if(ANDROID)
         if(EXISTS "${GOW2_GS_VK_DIR}/compile_shaders.cmake")
             if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
                 set(GOW2_NDK_HOST_TAG "windows-x86_64")
+                set(GOW2_HOST_EXE_SUFFIX ".exe")
             elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
                 set(GOW2_NDK_HOST_TAG "darwin-x86_64")
+                set(GOW2_HOST_EXE_SUFFIX "")
             else()
                 set(GOW2_NDK_HOST_TAG "linux-x86_64")
+                set(GOW2_HOST_EXE_SUFFIX "")
             endif()
-            set(GOW2_GLSLC "${ANDROID_NDK}/shader-tools/${GOW2_NDK_HOST_TAG}/glslc${CMAKE_EXECUTABLE_SUFFIX}")
+
+            set(GOW2_NDK_DIR "${ANDROID_NDK}")
+            if(NOT GOW2_NDK_DIR AND CMAKE_ANDROID_NDK)
+                set(GOW2_NDK_DIR "${CMAKE_ANDROID_NDK}")
+            endif()
+            if(NOT GOW2_NDK_DIR AND DEFINED ENV{ANDROID_NDK_ROOT})
+                set(GOW2_NDK_DIR "$ENV{ANDROID_NDK_ROOT}")
+            endif()
+            if(NOT GOW2_NDK_DIR AND DEFINED ENV{ANDROID_NDK_HOME})
+                set(GOW2_NDK_DIR "$ENV{ANDROID_NDK_HOME}")
+            endif()
+
+            set(GOW2_GLSLC "${GOW2_NDK_DIR}/shader-tools/${GOW2_NDK_HOST_TAG}/glslc${GOW2_HOST_EXE_SUFFIX}")
+            if(NOT EXISTS "${GOW2_GLSLC}")
+                find_program(GOW2_GLSLC glslc HINTS "${GOW2_NDK_DIR}/shader-tools/${GOW2_NDK_HOST_TAG}")
+            endif()
+
             if(EXISTS "${GOW2_GLSLC}")
                 execute_process(
                     COMMAND "${CMAKE_COMMAND}" -DGLSLC=${GOW2_GLSLC}
@@ -68,20 +87,29 @@ if(ANDROID)
                             -P "${GOW2_GS_VK_DIR}/compile_shaders.cmake"
                     RESULT_VARIABLE gow2_glslc_result)
                 if(NOT gow2_glslc_result EQUAL 0)
-                    message(FATAL_ERROR "gs_vk: shader compilation failed (glslc ${GOW2_GLSLC})")
+                    message(WARNING "gs_vk: shader compilation failed (glslc ${GOW2_GLSLC})")
                 endif()
             else()
-                message(WARNING "gs_vk: glslc not found at ${GOW2_GLSLC}; expecting pre-built .spv files")
+                message(STATUS "gs_vk: glslc not found at ${GOW2_GLSLC}; checking for pre-built shaders")
             endif()
         endif()
 
         # Embed the SPIR-V blobs so nothing has to be packaged as an asset.
-        execute_process(
-            COMMAND "${CMAKE_COMMAND}" -DSPV_DIR=${GOW2_SPV_DIR} -DOUT_CPP=${GOW2_SHADER_CPP} -DOUT_H=${GOW2_SHADER_H}
-                    -P "${GOW2_REPO_DIR}/cmake/embed_spirv.cmake"
-            RESULT_VARIABLE gow2_spv_result)
-        if(NOT gow2_spv_result EQUAL 0)
-            message(FATAL_ERROR "gs_vk: SPIR-V embedding failed")
+        file(GLOB gow2_spv_files "${GOW2_SPV_DIR}/*.spv")
+        if(gow2_spv_files)
+            execute_process(
+                COMMAND "${CMAKE_COMMAND}" -DSPV_DIR=${GOW2_SPV_DIR} -DOUT_CPP=${GOW2_SHADER_CPP} -DOUT_H=${GOW2_SHADER_H}
+                        -P "${GOW2_REPO_DIR}/cmake/embed_spirv.cmake"
+                RESULT_VARIABLE gow2_spv_result)
+            if(NOT gow2_spv_result EQUAL 0)
+                message(FATAL_ERROR "gs_vk: SPIR-V embedding failed")
+            endif()
+        elseif(EXISTS "${GOW2_GS_VK_DIR}/_gen/gs_vk_shaders_generated.cpp" AND EXISTS "${GOW2_GS_VK_DIR}/_gen/gs_vk_shaders_generated.h")
+            message(STATUS "gs_vk: using checked-in prebuilt shaders from ${GOW2_GS_VK_DIR}/_gen")
+            configure_file("${GOW2_GS_VK_DIR}/_gen/gs_vk_shaders_generated.cpp" "${GOW2_SHADER_CPP}" COPYONLY)
+            configure_file("${GOW2_GS_VK_DIR}/_gen/gs_vk_shaders_generated.h" "${GOW2_SHADER_H}" COPYONLY)
+        else()
+            message(FATAL_ERROR "gs_vk: no SPIR-V files compiled and no prebuilt shaders found!")
         endif()
 
         include("${GOW2_GS_VK_DIR}/sources.cmake")
