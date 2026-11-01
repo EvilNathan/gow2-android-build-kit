@@ -951,8 +951,7 @@ bool GSVkBackend::Impl::createDeviceObjects()
             return fail("init render pass"), false;
     }
     {
-        // present image: one colour attachment, also bound as input attachment
-        // (descriptor set layout is shared with the draw program), no depth
+        // present image: one colour attachment, no input attachment, no depth
         VkAttachmentDescription atts[1] = {attColor};
         atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -961,8 +960,8 @@ bool GSVkBackend::Impl::createDeviceObjects()
         psub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
         psub.colorAttachmentCount = 1;
         psub.pColorAttachments = &cRef;
-        psub.inputAttachmentCount = 1;
-        psub.pInputAttachments = &cRef;
+        psub.inputAttachmentCount = 0;
+        psub.pInputAttachments = nullptr;
         VkRenderPassCreateInfo ri{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
         ri.attachmentCount = 1;
         ri.pAttachments = atts;
@@ -1310,20 +1309,41 @@ VkPipeline GSVkBackend::Impl::buildPipeline(const PipelineKey &key)
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", nullptr},
     };
 
-    VkVertexInputBindingDescription bind{0, sizeof(HwVertex), VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription attr[6] = {
-        {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(HwVertex, x)},
-        {1, 0, VK_FORMAT_R32_SFLOAT, offsetof(HwVertex, z)},
-        {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(HwVertex, r)},
-        {3, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(HwVertex, s)},
-        {4, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(HwVertex, u)},
-        {5, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(HwVertex, cu0)},
-    };
+    VkVertexInputBindingDescription bind{};
+    VkVertexInputAttributeDescription attr[6] = {};
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    vi.vertexBindingDescriptionCount = 1;
-    vi.pVertexBindingDescriptions = &bind;
-    vi.vertexAttributeDescriptionCount = 6;
-    vi.pVertexAttributeDescriptions = attr;
+
+    if (key.program == Program::Draw)
+    {
+        bind = {0, sizeof(HwVertex), VK_VERTEX_INPUT_RATE_VERTEX};
+        attr[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(HwVertex, x)};
+        attr[1] = {1, 0, VK_FORMAT_R32_SFLOAT, offsetof(HwVertex, z)};
+        attr[2] = {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(HwVertex, r)};
+        attr[3] = {3, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(HwVertex, s)};
+        attr[4] = {4, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(HwVertex, u)};
+        attr[5] = {5, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(HwVertex, cu0)};
+        vi.vertexBindingDescriptionCount = 1;
+        vi.pVertexBindingDescriptions = &bind;
+        vi.vertexAttributeDescriptionCount = 6;
+        vi.pVertexAttributeDescriptions = attr;
+    }
+    else if (key.program == Program::Shuffle)
+    {
+        bind = {0, sizeof(ShuffleVertex), VK_VERTEX_INPUT_RATE_VERTEX};
+        attr[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(ShuffleVertex, x)};
+        attr[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(ShuffleVertex, ox)};
+        vi.vertexBindingDescriptionCount = 1;
+        vi.pVertexBindingDescriptions = &bind;
+        vi.vertexAttributeDescriptionCount = 2;
+        vi.pVertexAttributeDescriptions = attr;
+    }
+    else // Program::Present
+    {
+        vi.vertexBindingDescriptionCount = 0;
+        vi.pVertexBindingDescriptions = nullptr;
+        vi.vertexAttributeDescriptionCount = 0;
+        vi.pVertexAttributeDescriptions = nullptr;
+    }
 
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -1359,9 +1379,9 @@ VkPipeline GSVkBackend::Impl::buildPipeline(const PipelineKey &key)
     cb.attachmentCount = 1;
     cb.pAttachments = &att;
 
-    VkDynamicState dynStates[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkDynamicState dynStates[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_BLEND_CONSTANTS};
     VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dyn.dynamicStateCount = 2;
+    dyn.dynamicStateCount = 3;
     dyn.pDynamicStates = dynStates;
 
     VkGraphicsPipelineCreateInfo gi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
@@ -3006,7 +3026,7 @@ void GSVkBackend::Impl::drawCircuit(VkImageView src, uint32_t cdbx, uint32_t cdb
     u.uSrcEdge[0] = static_cast<int32_t>(srcEdge);
     std::memcpy(ubo.cpu, &u, sizeof(u));
     VkDescriptorImageInfo texInfo{nearestSampler, src, VK_IMAGE_LAYOUT_GENERAL};
-    VkDescriptorImageInfo destInfo{VK_NULL_HANDLE, presentView, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo destInfo{VK_NULL_HANDLE, blackTex.view, VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo tablesInfo{nearestSampler, tableView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo rtColorInfo{nearestSampler, blackTex.view, VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo palInfo{nearestSampler, blackTex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
@@ -3025,7 +3045,7 @@ void GSVkBackend::Impl::drawCircuit(VkImageView src, uint32_t cdbx, uint32_t cdb
 
     PipelineKey key{};
     key.program = Program::Present;
-    key.writeMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT;
+    key.writeMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     key.srcAlpha = key.dstAlpha = VK_BLEND_FACTOR_ONE;
     if (blendOver)
     {
@@ -3034,15 +3054,15 @@ void GSVkBackend::Impl::drawCircuit(VkImageView src, uint32_t cdbx, uint32_t cdb
         {
             key.srcColor = VK_BLEND_FACTOR_CONSTANT_COLOR;
             key.dstColor = VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
-            key.srcAlpha = VK_BLEND_FACTOR_ONE;
-            key.dstAlpha = VK_BLEND_FACTOR_ZERO;
+            key.srcAlpha = VK_BLEND_FACTOR_ZERO;
+            key.dstAlpha = VK_BLEND_FACTOR_ONE;
         }
         else
         {
             key.srcColor = VK_BLEND_FACTOR_SRC_ALPHA;
             key.dstColor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            key.srcAlpha = VK_BLEND_FACTOR_ONE;
-            key.dstAlpha = VK_BLEND_FACTOR_ZERO;
+            key.srcAlpha = VK_BLEND_FACTOR_ZERO;
+            key.dstAlpha = VK_BLEND_FACTOR_ONE;
         }
     }
     if (blendOver && mmod)
@@ -3332,7 +3352,10 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         {
             Impl::RenderTarget *crt = d.findTarget(cfbp);
             if (!crt)
+            {
+                ps2x::host::Log("host/gs-vk", "drawCircuit: target fbp=%u not found!", cfbp);
                 return;
+            }
             const bool ct24 = ((dispfb >> 15) & 0x1Fu) == GS_PSM_CT24;
             d.drawCircuit(crt->colorSampled, cdbx, cdby, ct24, alphaFactor, srcEdge, blendOver, 0, mmod, alp);
         };
@@ -3460,8 +3483,9 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
 
             if (d.presentCount <= 10 || (d.presentCount % 60) == 0)
             {
-                ps2x::host::Log("host/gs-vk", "Frame %d presented OK (%ux%u -> %ux%u)",
-                                d.presentCount, outW, outH, d.swap.width, d.swap.height);
+                ps2x::host::Log("host/gs-vk", "Frame %d presented OK (%ux%u -> %ux%u) pmode=0x%llx fbp1=%u fbp2=%u ok1=%d ok2=%d",
+                                d.presentCount, outW, outH, d.swap.width, d.swap.height,
+                                (unsigned long long)request.pmode, fbp1, fbp2, ok1 ? 1 : 0, ok2 ? 1 : 0);
             }
         }
         else
