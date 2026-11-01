@@ -35,6 +35,8 @@ public final class Settings {
     public String isoUri = "";
     /** Custom ISO file path (direct play or /sdcard/gow2). If empty, defaults to gow2.iso in app files dir. */
     public String isoPath = "";
+    /** Custom Boot ELF file path (e.g. SCUS_974.81). If empty, falls back to default search. */
+    public String bootElf = "";
     /** Source of the active ISO: "direct", "sdcard", "imported", or "auto". */
     public String isoSource = "auto";
     public String logLevel = LOG_INFO;
@@ -56,6 +58,7 @@ public final class Settings {
         other.padScript = padScript;
         other.isoUri = isoUri;
         other.isoPath = isoPath;
+        other.bootElf = bootElf;
         other.isoSource = isoSource;
         other.logLevel = logLevel;
         other.touchScale = touchScale;
@@ -100,13 +103,16 @@ public final class Settings {
         if (isoPath == null) {
             isoPath = "";
         }
+        if (bootElf == null) {
+            bootElf = "";
+        }
         if (isoSource == null) {
             isoSource = "auto";
         }
     }
 
     public String toJson() {
-        StringBuilder json = new StringBuilder(380);
+        StringBuilder json = new StringBuilder(420);
         json.append('{');
         appendFloat(json, "scale", scale).append(',');
         appendString(json, "aspect", aspect).append(',');
@@ -116,6 +122,7 @@ public final class Settings {
         appendString(json, "padScript", padScript).append(',');
         appendString(json, "isoUri", isoUri).append(',');
         appendString(json, "isoPath", isoPath).append(',');
+        appendString(json, "bootElf", bootElf).append(',');
         appendString(json, "isoSource", isoSource).append(',');
         appendString(json, "logLevel", logLevel).append(',');
         appendFloat(json, "touchScale", touchScale).append(',');
@@ -141,6 +148,7 @@ public final class Settings {
             settings.padScript = object.optString("padScript", settings.padScript);
             settings.isoUri = object.optString("isoUri", settings.isoUri);
             settings.isoPath = object.optString("isoPath", settings.isoPath);
+            settings.bootElf = object.optString("bootElf", settings.bootElf);
             settings.isoSource = object.optString("isoSource", settings.isoSource);
             settings.logLevel = object.optString("logLevel", settings.logLevel);
             settings.touchScale = (float) object.optDouble("touchScale", settings.touchScale);

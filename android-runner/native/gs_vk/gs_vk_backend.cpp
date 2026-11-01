@@ -400,6 +400,8 @@ struct GSVkBackend::Impl
         uint32_t width = 0, height = 0;
         VkFormat format = VK_FORMAT_UNDEFINED;
         bool ok = false;
+        bool needsRecreate = false;
+        bool canBlit = false;
     } swap;
     void *presentWindow = nullptr;
 
@@ -646,6 +648,7 @@ namespace
 void GSVkBackend::Impl::fail(const char *what)
 {
     std::fprintf(stderr, "[gs-vk] unavailable: %s\n", what);
+    ps2x::host::Log("E/host/gs-vk", "Vulkan unavailable: %s", what);
     failed = true;
 }
 
@@ -1145,6 +1148,9 @@ uint32_t GSVkBackend::Impl::memoryType(VkMemoryRequirements req, VkMemoryPropert
     gs_vk::vk.GetPhysicalDeviceMemoryProperties(phys, &memProps);
     for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
         if ((req.memoryTypeBits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & props) == props)
+            return i;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+        if (req.memoryTypeBits & (1u << i))
             return i;
     return 0;
 }
@@ -3016,32 +3022,61 @@ void GSVkBackend::Impl::ensureSwapchain()
 {
 #ifdef __ANDROID__
     void *win = ps2x::host::NativeWindow();
-    presentWindow = win;
     if (!win)
     {
-        destroySwapchain();
+        if (presentWindow != nullptr)
+        {
+            destroySwapchain();
+            presentWindow = nullptr;
+        }
         return;
     }
+
     int sw = 0, sh = 0;
     ps2x::host::GetSurfaceSize(sw, sh);
-    if (swap.swapchain && static_cast<int>(swap.width) == sw && static_cast<int>(swap.height) == sh)
+
+    const bool sizeChanged = (sw > 0 && sh > 0 && (static_cast<int>(swap.width) != sw || static_cast<int>(swap.height) != sh));
+    if (swap.swapchain != VK_NULL_HANDLE && swap.ok && presentWindow == win && !swap.needsRecreate && !sizeChanged)
         return;
-    destroySwapchain();
-    VkAndroidSurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
-    si.window = static_cast<ANativeWindow *>(win);
-    if (gs_vk::vk.CreateAndroidSurfaceKHR(instance, &si, nullptr, &swap.surface) != VK_SUCCESS)
+
+    ps2x::host::Log("host/gs-vk", "Creating swapchain for window %p (surface: %dx%d, current: %ux%u, needsRecreate=%d)",
+                    win, sw, sh, swap.width, swap.height, swap.needsRecreate ? 1 : 0);
+
+    if (presentWindow != win || swap.surface == VK_NULL_HANDLE)
     {
-        std::fprintf(stderr, "[gs-vk] surface creation failed\n");
+        destroySwapchain();
+        presentWindow = win;
+
+        VkAndroidSurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
+        si.window = static_cast<ANativeWindow *>(win);
+        VkResult sRes = gs_vk::vk.CreateAndroidSurfaceKHR(instance, &si, nullptr, &swap.surface);
+        if (sRes != VK_SUCCESS)
+        {
+            ps2x::host::Log("E/host/gs-vk", "CreateAndroidSurfaceKHR failed: %d", sRes);
+            return;
+        }
+    }
+
+    swap.needsRecreate = false;
+
+    VkSurfaceCapabilitiesKHR caps{};
+    if (!gs_vk::vk.GetPhysicalDeviceSurfaceCapabilitiesKHR ||
+        gs_vk::vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(phys, swap.surface, &caps) != VK_SUCCESS)
+    {
+        ps2x::host::Log("E/host/gs-vk", "GetPhysicalDeviceSurfaceCapabilitiesKHR failed");
         return;
     }
-    VkSurfaceCapabilitiesKHR caps{};
-    if (!gs_vk::vk.GetPhysicalDeviceSurfaceCapabilitiesKHR || gs_vk::vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(phys, swap.surface, &caps) != VK_SUCCESS)
+
+    VkSurfaceFormatKHR formats[16] = {};
+    uint32_t nf = 16;
+    if (!gs_vk::vk.GetPhysicalDeviceSurfaceFormatsKHR ||
+        gs_vk::vk.GetPhysicalDeviceSurfaceFormatsKHR(phys, swap.surface, &nf, formats) != VK_SUCCESS || nf == 0)
+    {
+        ps2x::host::Log("E/host/gs-vk", "GetPhysicalDeviceSurfaceFormatsKHR failed");
         return;
-    VkSurfaceFormatKHR formats[8] = {};
-    uint32_t nf = 8;
-    if (!gs_vk::vk.GetPhysicalDeviceSurfaceFormatsKHR || gs_vk::vk.GetPhysicalDeviceSurfaceFormatsKHR(phys, swap.surface, &nf, formats) != VK_SUCCESS || nf == 0)
-        return;
+    }
     swap.format = (formats[0].format == VK_FORMAT_UNDEFINED) ? VK_FORMAT_R8G8B8A8_UNORM : formats[0].format;
+
     VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     ci.surface = swap.surface;
     uint32_t minCount = std::max(2u, caps.minImageCount);
@@ -3061,27 +3096,43 @@ void GSVkBackend::Impl::ensureSwapchain()
     }
     ci.imageExtent = extent;
     ci.imageArrayLayers = 1;
-    ci.imageUsage = (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)
-                        ? VK_IMAGE_USAGE_TRANSFER_DST_BIT
-                        : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+        usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ci.imageUsage = usage;
+
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     ci.clipped = VK_TRUE;
-    if (gs_vk::vk.CreateSwapchainKHR(device, &ci, nullptr, &swap.swapchain) != VK_SUCCESS)
+
+    VkSwapchainKHR oldSwap = swap.swapchain;
+    ci.oldSwapchain = oldSwap;
+    VkResult scRes = gs_vk::vk.CreateSwapchainKHR(device, &ci, nullptr, &swap.swapchain);
+    if (oldSwap != VK_NULL_HANDLE)
     {
-        std::fprintf(stderr, "[gs-vk] swapchain creation failed\n");
+        gs_vk::vk.DestroySwapchainKHR(device, oldSwap, nullptr);
+    }
+    if (scRes != VK_SUCCESS)
+    {
+        ps2x::host::Log("E/host/gs-vk", "CreateSwapchainKHR failed: %d", scRes);
+        swap.swapchain = VK_NULL_HANDLE;
+        swap.ok = false;
         return;
     }
+
     uint32_t n = 0;
     gs_vk::vk.GetSwapchainImagesKHR(device, swap.swapchain, &n, nullptr);
     swap.images.resize(n);
     gs_vk::vk.GetSwapchainImagesKHR(device, swap.swapchain, &n, swap.images.data());
     swap.width = extent.width;
     swap.height = extent.height;
+    swap.canBlit = (usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0;
     swap.ok = true;
-    std::fprintf(stderr, "[gs-vk] swapchain %ux%u fmt=%d images=%zu\n", swap.width, swap.height, static_cast<int>(swap.format), swap.images.size());
+    ps2x::host::Log("host/gs-vk", "Swapchain ready: %ux%u format=%d images=%zu canBlit=%d",
+                    swap.width, swap.height, static_cast<int>(swap.format), swap.images.size(), swap.canBlit ? 1 : 0);
 #else
     presentWindow = nullptr;
 #endif
@@ -3095,6 +3146,7 @@ void GSVkBackend::Impl::destroySwapchain()
     swap.surface = VK_NULL_HANDLE;
     swap.images.clear();
     swap.ok = false;
+    swap.needsRecreate = false;
 }
 
 PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
@@ -3105,6 +3157,10 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         return frame;
     d.flushPending();
     ++d.presentCount;
+
+    // Keep swapchain synchronized with window
+    d.ensureSwapchain();
+
     const bool enable1 = (request.pmode & 1ull) != 0ull, enable2 = (request.pmode & 2ull) != 0ull;
     const auto decode = [&](bool enabled, uint64_t dispfb, uint64_t display, uint32_t &fbp, uint32_t &fbw, uint32_t &dbx, uint32_t &dby,
                             uint32_t &w, uint32_t &h)
@@ -3122,8 +3178,78 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
     uint32_t fbp1, fbw1, dbx1, dby1, w1, h1, fbp2, fbw2, dbx2, dby2, w2, h2;
     const bool ok1 = enable1 && decode(true, request.dispfb1, request.display1, fbp1, fbw1, dbx1, dby1, w1, h1);
     const bool ok2 = enable2 && decode(true, request.dispfb2, request.display2, fbp2, fbw2, dbx2, dby2, w2, h2);
+
     if (!ok1 && !ok2)
+    {
+        // When circuits are not active yet, present a blank frame so the swapchain ticks and
+        // the surface is visibly attached to the Vulkan queue.
+        if (d.swap.ok)
+        {
+            uint32_t idx = 0;
+            VkResult acq = gs_vk::vk.AcquireNextImageKHR(d.device, d.swap.swapchain, 100000000ull, d.swap.acquired, VK_NULL_HANDLE, &idx);
+            if (acq == VK_ERROR_OUT_OF_DATE_KHR || acq == VK_SUBOPTIMAL_KHR)
+            {
+                d.swap.needsRecreate = true;
+            }
+            else if (acq == VK_SUCCESS)
+            {
+                d.beginFrameCb();
+                VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                bar.image = d.swap.images[idx];
+                bar.srcQueueFamilyIndex = bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                if (d.swap.canBlit)
+                {
+                    bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
+                    VkClearColorValue black{};
+                    gs_vk::vk.CmdClearColorImage(d.frameCb, d.swap.images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &bar.subresourceRange);
+                    VkImageMemoryBarrier bar2 = bar;
+                    bar2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    bar2.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                    bar2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    bar2.dstAccessMask = 0;
+                    gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar2);
+                }
+                else
+                {
+                    bar.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                    bar.dstAccessMask = 0;
+                    gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
+                }
+                d.endFrameCb();
+
+                VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+                VkSubmitInfo psu{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                psu.waitSemaphoreCount = 1;
+                psu.pWaitSemaphores = &d.swap.acquired;
+                psu.pWaitDstStageMask = &waitStage;
+                psu.commandBufferCount = 1;
+                psu.pCommandBuffers = &d.frameCb;
+                psu.signalSemaphoreCount = 1;
+                psu.pSignalSemaphores = &d.swap.rendered;
+                gs_vk::vk.ResetFences(d.device, 1, &d.frameFence);
+                gs_vk::vk.QueueSubmit(d.queue, 1, &psu, d.frameFence);
+                VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+                pi.waitSemaphoreCount = 1;
+                pi.pWaitSemaphores = &d.swap.rendered;
+                pi.swapchainCount = 1;
+                pi.pSwapchains = &d.swap.swapchain;
+                pi.pImageIndices = &idx;
+                VkResult presRes = gs_vk::vk.QueuePresentKHR(d.queue, &pi);
+                if (presRes == VK_ERROR_OUT_OF_DATE_KHR || presRes == VK_SUBOPTIMAL_KHR)
+                    d.swap.needsRecreate = true;
+
+                gs_vk::vk.WaitForFences(d.device, 1, &d.frameFence, VK_TRUE, 1000000000ull);
+                gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
+                gs_vk::vk.ResetCommandPool(d.device, d.cmdPool, 0);
+                d.cbOpen = false;
+            }
+        }
         return frame;
+    }
     constexpr uint32_t kTvLines = 448u;
     const uint32_t fbp = ok1 ? fbp1 : fbp2, w = ok1 ? w1 : w2, h = std::min(ok1 ? h1 : h2, kTvLines);
     frame.displayFbp = fbp;
@@ -3230,12 +3356,15 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
             bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
-            VkImageBlit blit{};
-            blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            blit.srcOffsets[1] = {static_cast<int32_t>(outW), static_cast<int32_t>(outH), 1};
-            blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            blit.dstOffsets[1] = {static_cast<int32_t>(d.swap.width), static_cast<int32_t>(d.swap.height), 1};
-            gs_vk::vk.CmdBlitImage(d.frameCb, d.presentImage, VK_IMAGE_LAYOUT_GENERAL, d.swap.images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+            if (d.swap.canBlit)
+            {
+                VkImageBlit blit{};
+                blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                blit.srcOffsets[1] = {static_cast<int32_t>(outW), static_cast<int32_t>(outH), 1};
+                blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                blit.dstOffsets[1] = {static_cast<int32_t>(d.swap.width), static_cast<int32_t>(d.swap.height), 1};
+                gs_vk::vk.CmdBlitImage(d.frameCb, d.presentImage, VK_IMAGE_LAYOUT_GENERAL, d.swap.images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+            }
             VkImageMemoryBarrier bar2 = bar;
             bar2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             bar2.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
@@ -3243,7 +3372,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
             bar2.dstAccessMask = 0;
             gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar2);
             d.endFrameCb();
-            VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
             VkSubmitInfo psu{VK_STRUCTURE_TYPE_SUBMIT_INFO};
             psu.waitSemaphoreCount = 1;
             psu.pWaitSemaphores = &d.swap.acquired;
@@ -3260,12 +3389,21 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
             pi.swapchainCount = 1;
             pi.pSwapchains = &d.swap.swapchain;
             pi.pImageIndices = &idx;
-            gs_vk::vk.QueuePresentKHR(d.queue, &pi);
+            VkResult presRes = gs_vk::vk.QueuePresentKHR(d.queue, &pi);
+            if (presRes == VK_ERROR_OUT_OF_DATE_KHR || presRes == VK_SUBOPTIMAL_KHR)
+                d.swap.needsRecreate = true;
+
             gs_vk::vk.WaitForFences(d.device, 1, &d.frameFence, VK_TRUE, 1000000000ull);
             gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
             gs_vk::vk.ResetCommandPool(d.device, d.cmdPool, 0);
             d.cbOpen = false;
             d.emptyTrash();
+
+            if ((d.presentCount % 300) == 1)
+            {
+                ps2x::host::Log("host/gs-vk", "Frame %d presented OK (%ux%u -> %ux%u)",
+                                d.presentCount, outW, outH, d.swap.width, d.swap.height);
+            }
         }
         else
             d.cbOpen = false;

@@ -336,6 +336,10 @@ void ApplySettingsJson(const char* json)
     if (isoPath != nullptr && !isoPath->empty()) {
         SetEnvVar("GOW2_ISO", *isoPath);
     }
+    const std::string* bootElf = FindSetting(settings, "bootElf");
+    if (bootElf != nullptr && !bootElf->empty()) {
+        SetEnvVar("GOW2_BOOT_ELF", *bootElf);
+    }
     SetEnvVar("GOW_PERF_DIAG", std::string("1"));
 }
 

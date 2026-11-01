@@ -168,8 +168,10 @@ public final class GameActivity extends Activity implements NativeBridge.RumbleS
 
     private void attachSurface(Surface surface) {
         if (surface == null || !surface.isValid()) {
+            Log.w(TAG, "attachSurface called with null or invalid surface");
             return;
         }
+        Log.i(TAG, "attachSurface: handing surface to nativeSetSurface");
         NativeBridge.nativeSetSurface(surface);
         surfaceReady = true;
         updatePauseState();
@@ -233,6 +235,8 @@ public final class GameActivity extends Activity implements NativeBridge.RumbleS
             return;
         }
         final boolean running = resumed && surfaceReady && !exitDialogShowing;
+        Log.i(TAG, "updatePauseState: resumed=" + resumed + " surfaceReady=" + surfaceReady
+                + " exitShowing=" + exitDialogShowing + " -> running=" + running);
         NativeBridge.nativeSetPaused(!running);
         if (running) {
             padMapper.reset();

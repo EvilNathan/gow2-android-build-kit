@@ -386,12 +386,17 @@ public final class MainActivity extends Activity {
 
     private void launchGame() {
         settings = store.get();
-        // Ensure active isoPath is saved
+        // Ensure active isoPath and bootElf are saved
         File effectiveIso = SettingsStore.resolveEffectiveIso(this, settings);
         if (effectiveIso != null) {
             settings.isoPath = effectiveIso.getAbsolutePath();
-            store.save(settings);
         }
+        File effectiveElf = SettingsStore.resolveEffectiveElf(this);
+        if (effectiveElf != null && effectiveElf.exists()) {
+            settings.bootElf = effectiveElf.getAbsolutePath();
+        }
+        store.save(settings);
+        Log.i(TAG, "Launching game: ISO=" + settings.isoPath + " ELF=" + settings.bootElf);
         startActivity(GameActivity.createIntent(this, settings));
     }
 

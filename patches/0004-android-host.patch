@@ -1,8 +1,8 @@
 diff --git a/ps2xRuntime/src/lib/ps2_android_runtime.cpp b/ps2xRuntime/src/lib/ps2_android_runtime.cpp
-index 40e3dea..9a36cf9 100644
+index 40e3dea..13d2eb0 100644
 --- a/ps2xRuntime/src/lib/ps2_android_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_android_runtime.cpp
-@@ -1,3 +1,75 @@
+@@ -1,3 +1,108 @@
 -// TODO: on-screen touch joystick / button overlay.
 +// Kit: Android game entry point. The Java host starts this on its own thread from
 +// NativeBridge.nativeStart(); the engine's desktop main() is not used on Android.
@@ -27,8 +27,40 @@ index 40e3dea..9a36cf9 100644
 +
 +namespace
 +{
++    static bool isReadableFile(const std::string &path)
++    {
++        if (path.empty()) return false;
++        FILE *f = std::fopen(path.c_str(), "rb");
++        if (f) { std::fclose(f); return true; }
++        return false;
++    }
++
 +    std::string bootElfPath()
 +    {
++        if (const char *fromHost = std::getenv("GOW2_BOOT_ELF"); fromHost && *fromHost)
++        {
++            if (isReadableFile(fromHost))
++            {
++                ps2x::host::Log("ps2x", "[android] boot ELF resolved via GOW2_BOOT_ELF: %s", fromHost);
++                return fromHost;
++            }
++            ps2x::host::Log("ps2x", "[android] GOW2_BOOT_ELF (%s) not readable, checking fallbacks", fromHost);
++        }
++
++        const char *candidates[] = {
++            "/sdcard/gow2/SCUS_974.81",
++            "/storage/emulated/0/gow2/SCUS_974.81",
++            PS2X_DEFAULT_BOOT_ELF
++        };
++        for (const char *c : candidates)
++        {
++            if (c && *c && isReadableFile(c))
++            {
++                ps2x::host::Log("ps2x", "[android] boot ELF resolved via fallback: %s", c);
++                return c;
++            }
++        }
++
 +        if (const char *fromHost = std::getenv("GOW2_BOOT_ELF"); fromHost && *fromHost)
 +            return fromHost;
 +        return PS2X_DEFAULT_BOOT_ELF;
@@ -61,6 +93,7 @@ index 40e3dea..9a36cf9 100644
 +        ps2InstallEeDiff(runtime);
 +        ps2InstallEeWatch(runtime);
 +        ps2InstallEePageWatch(runtime);
++        ps2x::host::Log("ps2x", "[android] runtime initialization complete, running game loop...");
 +        runtime.run();
 +        std::cout.flush();
 +        std::cerr.flush();
@@ -80,7 +113,6 @@ index 40e3dea..9a36cf9 100644
 +#else
 +extern "C" int ps2x_android_game_main(void) { return 0; }
 +#endif
-\ No newline at end of file
 diff --git a/ps2xRuntime/src/lib/ps2_audio_device.cpp b/ps2xRuntime/src/lib/ps2_audio_device.cpp
 index 55c60b0..1817f81 100644
 --- a/ps2xRuntime/src/lib/ps2_audio_device.cpp
@@ -157,7 +189,7 @@ index b008aea..a12bc25 100644
      if (refresh)
          return;
 diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
-index 3bb0e4d..5e0b7e4 100644
+index 5cc9ff8..f9df5c7 100644
 --- a/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
 @@ -3,6 +3,9 @@
@@ -258,7 +290,7 @@ index 3bb0e4d..5e0b7e4 100644
      m_hostWindowOwned = false;
  }
  
-@@ -2721,16 +2748,27 @@ void PS2Runtime::run()
+@@ -2793,16 +2820,27 @@ void PS2Runtime::run()
                  }
              }
          });

@@ -100,8 +100,48 @@ public final class SettingsStore {
         return null;
     }
 
+    /**
+     * Resolves the boot ELF file (SCUS_974.81), checking app storage and /sdcard/gow2.
+     */
+    public static File resolveEffectiveElf(Context context) {
+        // Priority 1: App files dir (extracted boot ELF)
+        File primary = new File(filesDir(context), BOOT_ELF_NAME);
+        if (primary.isFile() && primary.canRead() && primary.length() > 1024 * 1024L) {
+            return primary;
+        }
+
+        // Priority 2: Internal files dir (if filesDir was external)
+        File internal = new File(context.getFilesDir(), BOOT_ELF_NAME);
+        if (internal.isFile() && internal.canRead() && internal.length() > 1024 * 1024L) {
+            return internal;
+        }
+
+        // Priority 3: External files dir (if filesDir was internal)
+        File ext = context.getExternalFilesDir(null);
+        if (ext != null) {
+            File external = new File(ext, BOOT_ELF_NAME);
+            if (external.isFile() && external.canRead() && external.length() > 1024 * 1024L) {
+                return external;
+            }
+        }
+
+        // Priority 4: /sdcard/gow2
+        File sdcard = new File("/sdcard/gow2", BOOT_ELF_NAME);
+        if (sdcard.isFile() && sdcard.canRead() && sdcard.length() > 1024 * 1024L) {
+            return sdcard;
+        }
+
+        // Priority 5: /storage/emulated/0/gow2
+        File emulated = new File("/storage/emulated/0/gow2", BOOT_ELF_NAME);
+        if (emulated.isFile() && emulated.canRead() && emulated.length() > 1024 * 1024L) {
+            return emulated;
+        }
+
+        return primary;
+    }
+
     public static File bootElfFile(Context context) {
-        return new File(filesDir(context), BOOT_ELF_NAME);
+        return resolveEffectiveElf(context);
     }
 
     public static String filesPath(Context context) {

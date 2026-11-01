@@ -13,8 +13,10 @@
 #include <exception>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <pthread.h>
 
 namespace ps2x::host {
 namespace {
@@ -119,6 +121,62 @@ void WriteLineLocked(const char* tag, const char* message)
     std::abort();
 }
 
+int s_pipeFds[2] = {-1, -1};
+std::atomic<bool> s_pipeRunning{false};
+
+void StartStdioRedirection()
+{
+    if (s_pipeRunning.exchange(true))
+        return;
+
+    std::fflush(stdout);
+    std::fflush(stderr);
+
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
+
+    if (::pipe(s_pipeFds) != 0) {
+        s_pipeRunning = false;
+        return;
+    }
+
+    ::dup2(s_pipeFds[1], STDOUT_FILENO);
+    ::dup2(s_pipeFds[1], STDERR_FILENO);
+
+    std::thread readerThread([]() {
+        ::pthread_setname_np(::pthread_self(), "ps2x-stdio");
+        char buffer[1024];
+        std::string lineBuf;
+        lineBuf.reserve(256);
+
+        while (s_pipeRunning.load()) {
+            ssize_t bytesRead = ::read(s_pipeFds[0], buffer, sizeof(buffer) - 1);
+            if (bytesRead <= 0)
+                break;
+            buffer[bytesRead] = '\0';
+            for (ssize_t i = 0; i < bytesRead; ++i) {
+                char c = buffer[i];
+                if (c == '\n' || c == '\r') {
+                    if (!lineBuf.empty()) {
+                        Log("runtime", "%s", lineBuf.c_str());
+                        lineBuf.clear();
+                    }
+                } else {
+                    lineBuf += c;
+                    if (lineBuf.size() >= 512) {
+                        Log("runtime", "%s", lineBuf.c_str());
+                        lineBuf.clear();
+                    }
+                }
+            }
+        }
+        if (!lineBuf.empty()) {
+            Log("runtime", "%s", lineBuf.c_str());
+        }
+    });
+    readerThread.detach();
+}
+
 } // namespace
 
 void StartLog(const char* directory)
@@ -157,6 +215,7 @@ void StartLog(const char* directory)
 
         std::set_terminate(OnTerminate);
         detail::CrashInstall();
+        StartStdioRedirection();
 
         Log("host", "---- session start ----");
         Log("host", "sdk=%d pid=%d log=%s", GetSdkInt(), static_cast<int>(::getpid()), g_logPath);

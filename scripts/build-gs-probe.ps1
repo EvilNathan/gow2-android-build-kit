@@ -43,7 +43,7 @@ Get-ChildItem (Join-Path $RepoRoot 'android-runner\native\gs_vk\shaders') -Inclu
     & $glslc --target-env=vulkan1.1 -o (Join-Path $spvDir ($_.Name + '.spv')) $_.FullName
     if ($LASTEXITCODE -ne 0) { throw "shader failed: $($_.Name)" }
 }
-& cmake -DSPV_DIR=$spvDir -DOUT_CPP=(Join-Path $genRoot 'gs_vk_shaders_generated.cpp') -DOUT_H=(Join-Path $genRoot 'gs_vk_shaders_generated.h') -P (Join-Path $RepoRoot 'cmake\embed_spirv.cmake')
+& cmake "-DSPV_DIR=$spvDir" "-DOUT_CPP=$(Join-Path $genRoot 'gs_vk_shaders_generated.cpp')" "-DOUT_H=$(Join-Path $genRoot 'gs_vk_shaders_generated.h')" -P (Join-Path $RepoRoot 'cmake\embed_spirv.cmake')
 if ($LASTEXITCODE -ne 0) { throw 'SPIR-V embedding failed' }
 
 $inc = @(
