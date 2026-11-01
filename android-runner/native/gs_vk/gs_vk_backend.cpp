@@ -874,13 +874,14 @@ bool GSVkBackend::Impl::createDeviceObjects()
     sub.colorAttachmentCount = 1;
     sub.pColorAttachments = &cRef;
     sub.pDepthStencilAttachment = &dRef;
-    sub.inputAttachmentCount = 0;
-    sub.pInputAttachments = nullptr; // EXPERIMENT
-    VkSubpassDependency self{VK_SUBPASS_EXTERNAL, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                             VK_ACCESS_MEMORY_WRITE_BIT,
-                             VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
-                             0};
+    sub.inputAttachmentCount = 1;
+    sub.pInputAttachments = &cRef;
+    VkSubpassDependency self{0, 0,
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                             VK_ACCESS_INPUT_ATTACHMENT_READ_BIT,
+                             VK_DEPENDENCY_BY_REGION_BIT};
     VkSubpassDependency ext{VK_SUBPASS_EXTERNAL, 0,
                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                             VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, 0};
@@ -1399,8 +1400,9 @@ VkPipeline GSVkBackend::Impl::buildPipeline(const PipelineKey &key)
     gi.renderPass = key.program == Program::Present ? rpPresent : rpDraw;
     gi.subpass = 0;
     VkPipeline p = VK_NULL_HANDLE;
-    if (gs_vk::vk.CreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gi, nullptr, &p) != VK_SUCCESS)
-        std::fprintf(stderr, "[gs-vk] pipeline creation failed (program %d)\n", static_cast<int>(key.program));
+    VkResult res = gs_vk::vk.CreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gi, nullptr, &p);
+    if (res != VK_SUCCESS)
+        ps2x::host::Log("host/gs-vk", "Pipeline creation failed (program %d, res=%d)", static_cast<int>(key.program), static_cast<int>(res));
     return p;
 }
 
@@ -2592,7 +2594,7 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
         VkDeviceSize offs = voff;
         gs_vk::vk.CmdBindVertexBuffers(frameCb, 0, 1, &vb, &offs);
         // pass 1 (uPass=1): keep passing fragments. pass 2 (AFAIL): keep failing ones
-        u.uPass = pass2 ? 2 : (ate ? 1 : 0);
+        u.uPass = ate ? 1 : 0;
         std::memcpy(ubo.cpu, &u, sizeof(u));
                 gs_vk::vk.CmdBindPipeline(frameCb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline(makeKey(blend, sf, df, equation, zwrite && !pass2, writeMask, pass2)));
         if (softBlend && !zAliasWrite && (s.colclamp & 1u) == 0u)
@@ -2618,26 +2620,45 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
         if (afail == 1u) failDepthWrite = false;                                   // FB_ONLY: colour+alpha, no Z
         else if (afail == 2u) failMask = 0u;                                       // ZB_ONLY: Z only
         else { failDepthWrite = false; failMask = writeMask & ~VK_COLOR_COMPONENT_A_BIT; } // RGB_ONLY
-        u.uPass = 2;
-        std::memcpy(ubo.cpu, &u, sizeof(u));
-        VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-        rb.renderPass = rpDraw;
-        rb.framebuffer = rt.fb;
-        rb.renderArea.extent = {rt.pxW, rt.pxH};
-        gs_vk::vk.CmdBeginRenderPass(frameCb, &rb, VK_SUBPASS_CONTENTS_INLINE);
-        VkViewport viewport{0.0f, 0.0f, static_cast<float>(rt.pxW), static_cast<float>(rt.pxH), 0.0f, 1.0f};
-        VkRect2D scissor{{static_cast<int32_t>(c.scissor.x0), static_cast<int32_t>(c.scissor.y0)},
-                         {std::max(1u, c.scissor.x1 - c.scissor.x0 + 1u), std::max(1u, c.scissor.y1 - c.scissor.y0 + 1u)}};
-        gs_vk::vk.CmdSetViewport(frameCb, 0, 1, &viewport);
-        gs_vk::vk.CmdSetScissor(frameCb, 0, 1, &scissor);
-        gs_vk::vk.CmdBindDescriptorSets(frameCb, VK_PIPELINE_BIND_POINT_GRAPHICS, drawPipelineLayout, 0, 1, &dsc, 0, nullptr);
-        VkBuffer vb = rings.buffer;
-        VkDeviceSize offs = voff;
-        gs_vk::vk.CmdBindVertexBuffers(frameCb, 0, 1, &vb, &offs);
-        gs_vk::vk.CmdBindPipeline(frameCb, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                  pipeline(makeKey(false, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD, failDepthWrite, failMask, true)));
-        gs_vk::vk.CmdDraw(frameCb, static_cast<uint32_t>(dverts.size()), 1, 0, 0);
-        gs_vk::vk.CmdEndRenderPass(frameCb);
+        auto ubo2 = rings.alloc(sizeof(DrawUbo), 256);
+        VkDescriptorSet dsc2 = VK_NULL_HANDLE;
+        VkResult dsc2Res = gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc2);
+        if (ubo2.cpu && dsc2Res == VK_SUCCESS)
+        {
+            DrawUbo u2 = u;
+            u2.uPass = 2;
+            std::memcpy(ubo2.cpu, &u2, sizeof(u2));
+            VkDescriptorBufferInfo bufInfo2{rings.buffer, ubo2.offset, sizeof(DrawUbo)};
+            VkWriteDescriptorSet writes2[7] = {
+                {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc2, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &texInfo, nullptr, nullptr},
+                {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc2, 1, 0, 1, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, &destInfo, nullptr, nullptr},
+                {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc2, 2, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &tablesInfo, nullptr, nullptr},
+                {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc2, 3, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &rtColorInfo, nullptr, nullptr},
+                {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc2, 4, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &palInfo, nullptr, nullptr},
+                {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc2, 5, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &idxPalInfo, nullptr, nullptr},
+                {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc2, 6, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &bufInfo2, nullptr},
+            };
+            gs_vk::vk.UpdateDescriptorSets(device, 7, writes2, 0, nullptr);
+
+            VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+            rb.renderPass = rpDraw;
+            rb.framebuffer = rt.fb;
+            rb.renderArea.extent = {rt.pxW, rt.pxH};
+            gs_vk::vk.CmdBeginRenderPass(frameCb, &rb, VK_SUBPASS_CONTENTS_INLINE);
+            VkViewport viewport{0.0f, 0.0f, static_cast<float>(rt.pxW), static_cast<float>(rt.pxH), 0.0f, 1.0f};
+            VkRect2D scissor{{static_cast<int32_t>(c.scissor.x0), static_cast<int32_t>(c.scissor.y0)},
+                             {std::max(1u, c.scissor.x1 - c.scissor.x0 + 1u), std::max(1u, c.scissor.y1 - c.scissor.y0 + 1u)}};
+            gs_vk::vk.CmdSetViewport(frameCb, 0, 1, &viewport);
+            gs_vk::vk.CmdSetScissor(frameCb, 0, 1, &scissor);
+            gs_vk::vk.CmdBindDescriptorSets(frameCb, VK_PIPELINE_BIND_POINT_GRAPHICS, drawPipelineLayout, 0, 1, &dsc2, 0, nullptr);
+            VkBuffer vb = rings.buffer;
+            VkDeviceSize offs = voff;
+            gs_vk::vk.CmdBindVertexBuffers(frameCb, 0, 1, &vb, &offs);
+            gs_vk::vk.CmdBindPipeline(frameCb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      pipeline(makeKey(false, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD, failDepthWrite, failMask, true)));
+            gs_vk::vk.CmdDraw(frameCb, static_cast<uint32_t>(dverts.size()), 1, 0, 0);
+            gs_vk::vk.CmdEndRenderPass(frameCb);
+        }
     }
     globalBarrier();
 }

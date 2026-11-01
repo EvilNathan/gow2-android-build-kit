@@ -54,7 +54,7 @@ layout(location = 4) flat out vec4 vUVClamp;
 
 void main()
 {
-    gl_Position = vec4(aPos * uInvSize * 2.0 - 1.0, aZ * 2.0 - 1.0, 1.0);
+    gl_Position = vec4(aPos * uInvSize * 2.0 - 1.0, aZ, 1.0);
     vCol = aCol;
     vColFlat = aCol;
     vSTQ = aSTQ;
