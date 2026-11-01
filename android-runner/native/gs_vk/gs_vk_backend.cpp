@@ -239,6 +239,8 @@ struct GSVkBackend::Impl
     uint32_t queueFamily = 0;
     VkCommandPool cmdPool = VK_NULL_HANDLE;
     VkCommandBuffer frameCb = VK_NULL_HANDLE;   // draws + uploads of the current frame
+    enum class CbState { Initial, Recording, Executable };
+    CbState cbState = CbState::Initial;
     bool cbOpen = false;
     VkFence frameFence = VK_NULL_HANDLE;
 
@@ -1191,32 +1193,49 @@ VkShaderModule GSVkBackend::Impl::shader(const char *name)
 
 void GSVkBackend::Impl::beginFrameCb()
 {
-    if (cbOpen)
+    if (cbState == CbState::Recording)
         return;
+    if (cbState == CbState::Executable)
+        submitAndWait();
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     gs_vk::vk.BeginCommandBuffer(frameCb, &bi);
+    cbState = CbState::Recording;
     cbOpen = true;
 }
 
 void GSVkBackend::Impl::endFrameCb()
 {
-    if (!cbOpen)
+    if (cbState != CbState::Recording)
         return;
     gs_vk::vk.EndCommandBuffer(frameCb);
+    cbState = CbState::Executable;
     cbOpen = false;
 }
 
 void GSVkBackend::Impl::submitAndWait()
 {
-    endFrameCb();
-    VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    su.commandBufferCount = 1;
-    su.pCommandBuffers = &frameCb;
-    gs_vk::vk.ResetFences(device, 1, &frameFence);
-    gs_vk::vk.QueueSubmit(queue, 1, &su, frameFence);
-    gs_vk::vk.WaitForFences(device, 1, &frameFence, VK_TRUE, 1000000000ull);
-    gs_vk::vk.ResetCommandBuffer(frameCb, 0);
-    gs_vk::vk.ResetCommandPool(device, cmdPool, 0);
+    if (cbState == CbState::Recording)
+        endFrameCb();
+
+    if (cbState == CbState::Executable)
+    {
+        VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        su.commandBufferCount = 1;
+        su.pCommandBuffers = &frameCb;
+        gs_vk::vk.ResetFences(device, 1, &frameFence);
+        gs_vk::vk.QueueSubmit(queue, 1, &su, frameFence);
+        gs_vk::vk.WaitForFences(device, 1, &frameFence, VK_TRUE, 1000000000ull);
+        gs_vk::vk.ResetCommandBuffer(frameCb, 0);
+        gs_vk::vk.ResetCommandPool(device, cmdPool, 0);
+        cbState = CbState::Initial;
+        cbOpen = false;
+    }
+    else
+    {
+        if (gs_vk::vk.QueueWaitIdle)
+            gs_vk::vk.QueueWaitIdle(queue);
+    }
     if (descPool && gs_vk::vk.ResetDescriptorPool)
         gs_vk::vk.ResetDescriptorPool(device, descPool, 0);
     rings.reset();
@@ -1491,7 +1510,7 @@ void GSVkBackend::Impl::createTarget(RenderTarget &t, uint32_t fbp, uint32_t fbw
     t.depthCleared = true;
     endFrameCb();
     submitAndWait();
-    std::fprintf(stderr, "[gs-vk] render target fbp=%u fbw=%u -> %ux%u\n", fbp, t.fbw, t.pxW, t.pxH);
+    ps2x::host::Log("host/gs-vk", "Render target fbp=%u fbw=%u -> %ux%u", fbp, t.fbw, t.pxW, t.pxH);
 }
 
 void GSVkBackend::Impl::destroyTarget(RenderTarget &t)
@@ -1747,6 +1766,7 @@ endFrameCb();
     gs_vk::vk.ResetCommandBuffer(frameCb, 0);
     gs_vk::vk.ResetCommandPool(device, cmdPool, 0);
     cbOpen = false;
+    cbState = CbState::Initial;
     emptyTrash();
     std::memcpy(rt.cpu.data(), readbackMapped, rt.cpu.size());
     rt.cpuVersion = rt.version;
@@ -2927,7 +2947,8 @@ presentFb = VK_NULL_HANDLE;
     imi.mipLevels = imi.arrayLayers = 1;
     imi.samples = VK_SAMPLE_COUNT_1_BIT;
     imi.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imi.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imi.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
     if (gs_vk::vk.CreateImage(device, &imi, nullptr, &presentImage) != VK_SUCCESS)
         return;
     VkMemoryRequirements req{};
@@ -2943,7 +2964,8 @@ presentFb = VK_NULL_HANDLE;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vi.format = VK_FORMAT_R8G8B8A8_UNORM;
     vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    gs_vk::vk.CreateImageView(device, &vi, nullptr, &presentView);
+    if (gs_vk::vk.CreateImageView(device, &vi, nullptr, &presentView) != VK_SUCCESS)
+        return;
     VkFramebufferCreateInfo fi{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
     fi.renderPass = rpPresent;
     fi.attachmentCount = 1;
@@ -2951,9 +2973,11 @@ presentFb = VK_NULL_HANDLE;
     fi.width = w;
     fi.height = h;
     fi.layers = 1;
-    gs_vk::vk.CreateFramebuffer(device, &fi, nullptr, &presentFb);
+    if (gs_vk::vk.CreateFramebuffer(device, &fi, nullptr, &presentFb) != VK_SUCCESS)
+        return;
     presentW = w;
     presentH = h;
+    ps2x::host::Log("host/gs-vk", "Present image created: %ux%u", w, h);
 }
 
 void GSVkBackend::Impl::drawCircuit(VkImageView src, uint32_t cdbx, uint32_t cdby, bool ct24, bool alphaFactor, uint32_t srcEdge, bool blendOver,
@@ -3268,6 +3292,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
                 gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
                 gs_vk::vk.ResetCommandPool(d.device, d.cmdPool, 0);
                 d.cbOpen = false;
+                d.cbState = Impl::CbState::Initial;
             }
         }
         return frame;
@@ -3345,6 +3370,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
     gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
     gs_vk::vk.ResetCommandPool(d.device, d.cmdPool, 0);
     d.cbOpen = false;
+    d.cbState = Impl::CbState::Initial;
     d.emptyTrash();
 
     std::memcpy(frame.pixels.data(), d.readbackMapped, frame.pixels.size());
@@ -3429,6 +3455,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
             gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
             gs_vk::vk.ResetCommandPool(d.device, d.cmdPool, 0);
             d.cbOpen = false;
+            d.cbState = Impl::CbState::Initial;
             d.emptyTrash();
 
             if (d.presentCount <= 10 || (d.presentCount % 60) == 0)
@@ -3438,7 +3465,10 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
             }
         }
         else
+        {
             d.cbOpen = false;
+            d.cbState = Impl::CbState::Initial;
+        }
     }
     return frame;
 }
