@@ -332,7 +332,7 @@ struct GSVkBackend::Impl
         uint64_t cpuVersion = 0;
         bool depthCleared = false;
     };
-    std::vector<RenderTarget> targets;
+    std::vector<std::unique_ptr<RenderTarget>> targets;
 
     // ---- textures ---------------------------------------------------------------------------------
     struct Texture
@@ -924,6 +924,8 @@ bool GSVkBackend::Impl::createDeviceObjects()
     }
     {
         VkAttachmentDescription atts[2] = {attColor, attDepth};
+        atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        atts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         atts[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -933,7 +935,8 @@ bool GSVkBackend::Impl::createDeviceObjects()
         ri.subpassCount = 1;
         ri.pSubpasses = &sub;
         ri.dependencyCount = 2;
-        ri.pDependencies = deps;
+        VkSubpassDependency initDeps[2] = {ext, extOut};
+        ri.pDependencies = initDeps;
         if (gs_vk::vk.CreateRenderPass(device, &ri, nullptr, &rpInitCD) != VK_SUCCESS)
             return fail("init render pass"), false;
     }
@@ -1021,14 +1024,20 @@ bool GSVkBackend::Impl::createDeviceObjects()
             bar.srcQueueFamilyIndex = bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            bar.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             bar.srcAccessMask = 0;
             bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             gs_vk::vk.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
             VkBufferImageCopy cp{};
             cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             cp.imageExtent = {w, h, 1};
-            gs_vk::vk.CmdCopyBufferToImage(cb, tmp.buffer, img.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1, &cp);
+            gs_vk::vk.CmdCopyBufferToImage(cb, tmp.buffer, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+            VkImageMemoryBarrier barPost = bar;
+            barPost.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barPost.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barPost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barPost.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            gs_vk::vk.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barPost);
             gs_vk::vk.EndCommandBuffer(cb);
             VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
             su.commandBufferCount = 1;
@@ -1330,28 +1339,28 @@ VkPipeline GSVkBackend::Impl::buildPipeline(const PipelineKey &key)
 
 GSVkBackend::Impl::RenderTarget *GSVkBackend::Impl::findTarget(uint32_t fbp)
 {
-    for (RenderTarget &t : targets)
-        if (t.fbp == fbp)
-            return &t;
+    for (const auto &t : targets)
+        if (t && t->fbp == fbp)
+            return t.get();
     return nullptr;
 }
 
 GSVkBackend::Impl::RenderTarget &GSVkBackend::Impl::target(uint32_t fbp, uint32_t fbw)
 {
-    std::fprintf(stderr, "[gs-vk] target(%u,%u\n", fbp, fbw);
-    for (RenderTarget &t : targets)
-        if (t.fbp == fbp && t.fbw >= fbw)
-            return t;
-    for (RenderTarget &t : targets)
-        if (t.fbp == fbp)
+    std::fprintf(stderr, "[gs-vk] target(%u,%u)\n", fbp, fbw);
+    for (const auto &t : targets)
+        if (t && t->fbp == fbp && t->fbw >= fbw)
+            return *t;
+    for (const auto &t : targets)
+        if (t && t->fbp == fbp)
         {
-            destroyTarget(t);
-            createTarget(t, fbp, fbw);
-            return t;
+            destroyTarget(*t);
+            createTarget(*t, fbp, fbw);
+            return *t;
         }
-    targets.emplace_back();
-    createTarget(targets.back(), fbp, fbw);
-    return targets.back();
+    targets.push_back(std::make_unique<RenderTarget>());
+    createTarget(*targets.back(), fbp, fbw);
+    return *targets.back();
 }
 
 void GSVkBackend::Impl::createTarget(RenderTarget &t, uint32_t fbp, uint32_t fbw)
@@ -1732,12 +1741,12 @@ endFrameCb();
 bool GSVkBackend::Impl::clutFromTarget(const GSTex0Reg &tex0, uint32_t width, const uint16_t *xy, uint32_t count, uint32_t *words)
 {
     RenderTarget *rt = findTarget(tex0.cbp);
-    for (RenderTarget &t : targets)
+    for (const auto &t : targets)
     {
         // prefer a target that owns this memory and has drawn content
-        if (t.fbp == tex0.cbp && t.usedW != 0u)
+        if (t && t->fbp == tex0.cbp && t->usedW != 0u)
         {
-            rt = &t;
+            rt = t.get();
             break;
         }
     }
@@ -1829,8 +1838,8 @@ void GSVkBackend::Impl::submit(const GSPrimitiveBatch &b)
         return;
     if (fpsm != GS_PSM_CT32 && fpsm != GS_PSM_CT24 && fpsm != GS_PSM_CT16 && fpsm != GS_PSM_CT16S)
         return;
-    for (const RenderTarget &t : targets)
-        if (t.fbp == s.context.frame.fbp && t.usedW != 0u && family16(t.psm) != family16(fpsm))
+    for (const auto &t : targets)
+        if (t && t->fbp == s.context.frame.fbp && t->usedW != 0u && family16(t->psm) != family16(fpsm))
             return;
     if (havePending && !sameState(pendingState, s))
         flushPending();
@@ -2084,11 +2093,12 @@ bool GSVkBackend::Impl::depthClearSprite(const GSDrawState &s, const GSPrimitive
     const GSVertex &v = b.vertices[1];
     const bool zWrites = ((c.test >> 16) & 1u) != 0u && ((c.test >> 17) & 3u) == 1u && !c.zbuf.zmask;
     bool any = false;
-    for (const RenderTarget &t : targets)
+    for (const auto &t : targets)
     {
+        if (!t) continue;
         int row = 0;
-        any = any || depthRowOf(t, c.frame.fbp, c.frame.fbw, c.frame.psm, row) ||
-              (zWrites && depthRowOf(t, c.zbuf.zbp, c.frame.fbw, c.zbuf.psm, row));
+        any = any || depthRowOf(*t, c.frame.fbp, c.frame.fbw, c.frame.psm, row) ||
+              (zWrites && depthRowOf(*t, c.zbuf.zbp, c.frame.fbw, c.zbuf.psm, row));
     }
     if (!any)
         return false;
@@ -2135,13 +2145,14 @@ bool GSVkBackend::Impl::depthClearSprite(const GSDrawState &s, const GSPrimitive
         if (inv != invertedZ.end())
             invertedZ.erase(inv);
     };
-    for (RenderTarget &t : targets)
+    for (const auto &t : targets)
     {
+        if (!t) continue;
         int row = 0;
-        if (depthRowOf(t, c.frame.fbp, c.frame.fbw, c.frame.psm, row))
-            clearRows(t, row, frameZ, c.frame.psm);
-        if (zWrites && depthRowOf(t, c.zbuf.zbp, c.frame.fbw, c.zbuf.psm, row))
-            clearRows(t, row, std::min(v.z, static_cast<double>(zMaxFor(c.zbuf.psm))), c.zbuf.psm);
+        if (depthRowOf(*t, c.frame.fbp, c.frame.fbw, c.frame.psm, row))
+            clearRows(*t, row, frameZ, c.frame.psm);
+        if (zWrites && depthRowOf(*t, c.zbuf.zbp, c.frame.fbw, c.zbuf.psm, row))
+            clearRows(*t, row, std::min(v.z, static_cast<double>(zMaxFor(c.zbuf.psm))), c.zbuf.psm);
     }
     return true;
 }
@@ -2309,42 +2320,42 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
                     return false;
                 }();
                 bool depthOver = false;
-                for (const RenderTarget &o : targets)
-                    if (&o != candidate && o.zbp != ~0u && o.zbp == candidate->fbp && o.lastDepthSeq > candidate->lastDrawSeq)
+                for (const auto &o : targets)
+                    if (o && o.get() != candidate && o->zbp != ~0u && o->zbp == candidate->fbp && o->lastDepthSeq > candidate->lastDrawSeq)
                         depthOver = true;
                 if (family(candidate->psm) == family(c.tex0.psm) && !since && !depthOver)
                     src = candidate;
             }
         const bool zFormat = c.tex0.psm == 0x30 || c.tex0.psm == 0x31 || c.tex0.psm == 0x32 || c.tex0.psm == 0x3A;
         if (zFormat && (c.tex0.tbp0 % 32u) == 0u)
-            for (RenderTarget &t : targets)
-                if (t.zbp != ~0u && t.zbp == c.tex0.tbp0 / 32u && t.fbp != t.zbp)
-                    zsrc = &t;
+            for (const auto &t : targets)
+                if (t && t->zbp != ~0u && t->zbp == c.tex0.tbp0 / 32u && t->fbp != t->zbp)
+                    zsrc = t.get();
         if (zsrc)
             src = nullptr;
         if (!src && !zsrc)
         {
             const bool highByte = c.tex0.psm == GS_PSM_T8H || c.tex0.psm == GS_PSM_T4HL || c.tex0.psm == GS_PSM_T4HH;
-            for (RenderTarget &t : targets)
+            for (const auto &t : targets)
             {
-                if (t.usedW == 0u || (highByte && t.psm == GS_PSM_CT24))
+                if (!t || t->usedW == 0u || (highByte && t->psm == GS_PSM_CT24))
                     continue;
                 bool depthOver = false;
-                for (const RenderTarget &o : targets)
-                    if (&o != &t && o.zbp != ~0u && o.zbp == t.fbp && o.lastDepthSeq > t.lastDrawSeq)
+                for (const auto &o : targets)
+                    if (o && o.get() != t.get() && o->zbp != ~0u && o->zbp == t->fbp && o->lastDepthSeq > t->lastDrawSeq)
                         depthOver = true;
                 if (depthOver)
                     continue;
-                const uint32_t tlo = t.fbp * 32u, thi = tlo + spanBlocks(t.psm, t.fbw, t.usedH);
+                const uint32_t tlo = t->fbp * 32u, thi = tlo + spanBlocks(t->psm, t->fbw, t->usedH);
                 if (c.tex0.tbp0 < tlo || c.tex0.tbp0 >= thi)
                     continue;
                 bool since = false;
                 for (const UploadRecord &rec : uploadLog)
-                    if (rec.seq > t.lastDrawSeq && rec.lo <= c.tex0.tbp0 && c.tex0.tbp0 < rec.hi)
+                    if (rec.seq > t->lastDrawSeq && rec.lo <= c.tex0.tbp0 && c.tex0.tbp0 < rec.hi)
                         since = true;
                 if (since)
                     continue;
-                rsrc = &t;
+                rsrc = t.get();
                 break;
             }
         }
@@ -2647,15 +2658,15 @@ bool GSVkBackend::Impl::tryShuffle(const GSDrawState &s, const GSPrimitiveBatch 
     RenderTarget *src = nullptr;
     bool srcDepth = false;
     if (zTex)
-        for (RenderTarget &t : targets)
-            if (t.zbp != ~0u && t.zbp == c.tex0.tbp0 / 32u && t.fbp != t.zbp)
+        for (const auto &t : targets)
+            if (t && t->zbp != ~0u && t->zbp == c.tex0.tbp0 / 32u && t->fbp != t->zbp)
             {
-                const bool widthMatches = t.fbw == c.tex0.tbw;
+                const bool widthMatches = t->fbw == c.tex0.tbw;
                 const bool srcWidthMatches = src && src->fbw == c.tex0.tbw;
                 if (!src || (widthMatches && !srcWidthMatches) ||
-                    (widthMatches == srcWidthMatches && t.lastDepthSeq >= src->lastDepthSeq))
+                    (widthMatches == srcWidthMatches && t->lastDepthSeq >= src->lastDepthSeq))
                 {
-                    src = &t;
+                    src = t.get();
                     srcDepth = true;
                 }
             }
@@ -2687,9 +2698,7 @@ bool GSVkBackend::Impl::tryShuffle(const GSDrawState &s, const GSPrimitiveBatch 
     if (!dst)
     {
         flushShuffle();
-        const size_t srcIndex = static_cast<size_t>(src - targets.data());
         dst = &target(c.frame.fbp, c.frame.fbw);
-        src = &targets[srcIndex];
     }
     const uint32_t srcOwnerPsm = srcDepth ? 0x30u : 0x00u, srcFbp = srcDepth ? src->zbp : src->fbp;
     std::vector<ShuffleVertex> quads[4];

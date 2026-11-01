@@ -4,7 +4,9 @@
 // async-signal-safe syscalls (open/write/close) where it matters; the unwind
 // pass is best-effort by design.
 #include "ps2x_host_internal.h"
+#include "ps2x_host.h"
 
+#include <android/log.h>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -98,12 +100,15 @@ _Unwind_Reason_Code BacktraceCallback(_Unwind_Context* context, void* argument)
 
     const uintptr_t pc = static_cast<uintptr_t>(_Unwind_GetIP(context));
     if (pc != 0) {
-        const Writer out{state->fd};
-        out.String("  #");
-        out.Decimal(static_cast<uint64_t>(state->index));
-        out.String(" ");
-        out.Hex(pc);
-        out.Char('\n');
+        if (state->fd >= 0) {
+            const Writer out{state->fd};
+            out.String("  #");
+            out.Decimal(static_cast<uint64_t>(state->index));
+            out.String(" ");
+            out.Hex(pc);
+            out.Char('\n');
+        }
+        __android_log_print(ANDROID_LOG_FATAL, "ps2x/crash", "  #%d 0x%lx", state->index, static_cast<unsigned long>(pc));
         ++state->index;
     }
     return state->index >= kMaxFrames ? _URC_END_OF_STACK : _URC_NO_REASON;
@@ -167,14 +172,8 @@ void CrashPath(char* out, size_t cap)
     out[used] = '\0';
 }
 
-void WriteReport(int sig, const char* reason, uintptr_t faultAddress, bool includeRing)
+void WriteToFd(int fd, int sig, const char* reason, uintptr_t faultAddress, bool includeRing)
 {
-    char path[kPathLen] = {0};
-    CrashPath(path, sizeof path);
-    if (path[0] == '\0')
-        return;
-
-    const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0)
         return;
 
@@ -200,7 +199,6 @@ void WriteReport(int sig, const char* reason, uintptr_t faultAddress, bool inclu
 
     if (includeRing) {
         AppendLine(out, "log ring (oldest first):");
-        // Small buffer: this may run on the 64 KiB signal stack.
         char ring[kRingDumpBytes];
         const size_t used = LogRingDump(ring, sizeof ring);
         out.Bytes(ring, used);
@@ -208,7 +206,33 @@ void WriteReport(int sig, const char* reason, uintptr_t faultAddress, bool inclu
             out.Char('\n');
     }
     AppendLine(out, "---- end of report ----");
-    (void)::close(fd);
+}
+
+void WriteReport(int sig, const char* reason, uintptr_t faultAddress, bool includeRing)
+{
+    ::ps2x::host::FlushLog();
+
+    __android_log_print(ANDROID_LOG_FATAL, "ps2x/crash", "CRASH: signal=%s fault=0x%lx reason=%s",
+                        SignalName(sig), static_cast<unsigned long>(faultAddress), reason ? reason : "unknown");
+
+    char path[kPathLen] = {0};
+    CrashPath(path, sizeof path);
+    if (path[0] != '\0') {
+        const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (fd >= 0) {
+            WriteToFd(fd, sig, reason, faultAddress, includeRing);
+            (void)::close(fd);
+        }
+    }
+
+    const std::string logPath = ::ps2x::host::LogFilePath();
+    if (!logPath.empty()) {
+        const int gow2Fd = ::open(logPath.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0666);
+        if (gow2Fd >= 0) {
+            WriteToFd(gow2Fd, sig, reason, faultAddress, includeRing);
+            (void)::close(gow2Fd);
+        }
+    }
 }
 
 void RestoreDefaultAndRaise(int sig)

@@ -146,6 +146,7 @@ void SetRumble(float low, float high);
 // ---------------------------------------------------------------------------
 void StartLog(const char* directory);
 void Log(const char* tag, const char* fmt, ...) PS2X_HOST_PRINTF(2, 3);
+void FlushLog();
 [[nodiscard]] std::string LogFilePath();
 
 // The app's files directory, as passed to nativeStart(); "" before that.

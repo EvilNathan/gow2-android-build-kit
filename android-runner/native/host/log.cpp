@@ -131,17 +131,14 @@ void WriteLineLocked(const char* tag, const char* message)
     if (written > 0)
         g_logBytesWritten += static_cast<size_t>(written);
 
-    const bool isUrgent = (safeTag[0] == 'E' || safeTag[0] == 'W' || std::strstr(safeMessage, "fatal") != nullptr || std::strstr(safeMessage, "crash") != nullptr);
-    if (isUrgent || (++g_linesSinceFlush >= 100)) {
-        std::fflush(g_logFile);
-        g_linesSinceFlush = 0;
-    }
+    std::fflush(g_logFile);
 }
 
 [[noreturn]] void OnTerminate()
 {
     try {
         Log("E/host", "std::terminate called");
+        FlushLog();
         detail::CrashWriteReport(0, "std::terminate");
     } catch (...) {
         // Nothing we can do while unwinding a terminate.
@@ -289,6 +286,17 @@ std::string LogFilePath()
         return std::string(g_logPath);
     } catch (...) {
         return std::string();
+    }
+}
+
+void FlushLog()
+{
+    try {
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        if (g_logFile != nullptr) {
+            std::fflush(g_logFile);
+        }
+    } catch (...) {
     }
 }
 
