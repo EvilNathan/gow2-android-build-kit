@@ -3193,6 +3193,11 @@ void GSVkBackend::Impl::ensureSwapchain()
     if (swap.swapchain != VK_NULL_HANDLE && swap.ok && presentWindow == win && !swap.needsRecreate && !sizeChanged)
         return;
 
+    if (device != VK_NULL_HANDLE)
+    {
+        gs_vk::vk.DeviceWaitIdle(device);
+    }
+
     ps2x::host::Log("host/gs-vk", "Creating swapchain for window %p (surface: %dx%d, current: %ux%u, needsRecreate=%d)",
                     win, sw, sh, swap.width, swap.height, swap.needsRecreate ? 1 : 0);
 
@@ -3241,15 +3246,13 @@ void GSVkBackend::Impl::ensureSwapchain()
     ci.imageColorSpace = formats[0].colorSpace;
 
     VkSurfaceTransformFlagBitsKHR preTransform = caps.currentTransform;
-    if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
-        preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    ci.preTransform = preTransform;
 
     VkExtent2D extent = caps.currentExtent;
-    uint32_t w = sw > 0 ? static_cast<uint32_t>(sw) : 1280u;
-    uint32_t h = sh > 0 ? static_cast<uint32_t>(sh) : 720u;
-    if (extent.width == 0xFFFFFFFF || extent.width == 0 ||
-        (preTransform == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR && ((w > h && extent.width < extent.height) || (w < h && extent.width > extent.height))))
+    if (extent.width == 0xFFFFFFFF || extent.height == 0xFFFFFFFF || extent.width == 0 || extent.height == 0)
     {
+        uint32_t w = sw > 0 ? static_cast<uint32_t>(sw) : 1280u;
+        uint32_t h = sh > 0 ? static_cast<uint32_t>(sh) : 720u;
         extent.width = std::max(caps.minImageExtent.width, std::min(caps.maxImageExtent.width, w));
         extent.height = std::max(caps.minImageExtent.height, std::min(caps.maxImageExtent.height, h));
     }
@@ -3262,7 +3265,6 @@ void GSVkBackend::Impl::ensureSwapchain()
     ci.imageUsage = usage;
 
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    ci.preTransform = preTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     ci.clipped = VK_TRUE;
@@ -3270,6 +3272,14 @@ void GSVkBackend::Impl::ensureSwapchain()
     VkSwapchainKHR oldSwap = swap.swapchain;
     ci.oldSwapchain = oldSwap;
     VkResult scRes = gs_vk::vk.CreateSwapchainKHR(device, &ci, nullptr, &swap.swapchain);
+    if (scRes != VK_SUCCESS && oldSwap != VK_NULL_HANDLE)
+    {
+        gs_vk::vk.DeviceWaitIdle(device);
+        gs_vk::vk.DestroySwapchainKHR(device, oldSwap, nullptr);
+        ci.oldSwapchain = VK_NULL_HANDLE;
+        scRes = gs_vk::vk.CreateSwapchainKHR(device, &ci, nullptr, &swap.swapchain);
+        oldSwap = VK_NULL_HANDLE;
+    }
     if (oldSwap != VK_NULL_HANDLE)
     {
         gs_vk::vk.DestroySwapchainKHR(device, oldSwap, nullptr);
@@ -3278,11 +3288,6 @@ void GSVkBackend::Impl::ensureSwapchain()
     {
         ps2x::host::Log("E/host/gs-vk", "CreateSwapchainKHR failed: %d", scRes);
         swap.swapchain = VK_NULL_HANDLE;
-        if (swap.surface != VK_NULL_HANDLE)
-        {
-            gs_vk::vk.DestroySurfaceKHR(instance, swap.surface, nullptr);
-            swap.surface = VK_NULL_HANDLE;
-        }
         swap.ok = false;
         return;
     }
@@ -3304,10 +3309,20 @@ void GSVkBackend::Impl::ensureSwapchain()
 
 void GSVkBackend::Impl::destroySwapchain()
 {
-    if (swap.swapchain) gs_vk::vk.DestroySwapchainKHR(device, swap.swapchain, nullptr);
-    if (swap.surface) gs_vk::vk.DestroySurfaceKHR(instance, swap.surface, nullptr);
-    swap.swapchain = VK_NULL_HANDLE;
-    swap.surface = VK_NULL_HANDLE;
+    if (device != VK_NULL_HANDLE)
+    {
+        gs_vk::vk.DeviceWaitIdle(device);
+    }
+    if (swap.swapchain)
+    {
+        gs_vk::vk.DestroySwapchainKHR(device, swap.swapchain, nullptr);
+        swap.swapchain = VK_NULL_HANDLE;
+    }
+    if (swap.surface)
+    {
+        gs_vk::vk.DestroySurfaceKHR(instance, swap.surface, nullptr);
+        swap.surface = VK_NULL_HANDLE;
+    }
     swap.images.clear();
     swap.ok = false;
     swap.needsRecreate = false;
@@ -3437,13 +3452,35 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         return frame;
 
     d.beginFrameCb();
+    // Mobile TBDR barrier: Ensure color attachment writes to render targets are visible before present sampling
+    for (const auto &t : d.targets)
+    {
+        if (t && t->color != VK_NULL_HANDLE && t->usedW != 0u)
+        {
+            VkImageMemoryBarrier imb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            imb.image = t->color;
+            imb.srcQueueFamilyIndex = imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            imb.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+            imb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            imb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+            imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            gs_vk::vk.CmdPipelineBarrier(d.frameCb,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &imb);
+        }
+    }
     {
         VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
         rb.renderPass = d.rpPresent;
         rb.framebuffer = d.presentFb;
         rb.renderArea.extent = {outW, outH};
         VkClearValue clear{};
-        clear.color = {{0.f, 0.f, 0.f, 1.f}};
+        clear.color = {{static_cast<float>(request.bgcolor & 0xFFu) / 255.f,
+                        static_cast<float>((request.bgcolor >> 8) & 0xFFu) / 255.f,
+                        static_cast<float>((request.bgcolor >> 16) & 0xFFu) / 255.f,
+                        1.f}};
         rb.pClearValues = &clear;
         rb.clearValueCount = 1;
         gs_vk::vk.CmdBeginRenderPass(d.frameCb, &rb, VK_SUBPASS_CONTENTS_INLINE);
@@ -3456,10 +3493,22 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         const uint32_t alp = static_cast<uint32_t>((request.pmode >> 8) & 0xFFu);
         auto drawOne = [&](uint32_t cfbp, uint64_t dispfb, uint32_t cdbx, uint32_t cdby, bool alphaFactor, bool blendOver)
         {
-            Impl::RenderTarget *crt = d.findTarget(cfbp);
-            if (!crt && request.hasPreferredSource)
-                crt = d.findTarget(request.preferredSource.fbp / 32u);
+            Impl::RenderTarget *crt = nullptr;
+            if (request.hasPreferredSource && request.preferredDestFbp == cfbp)
+            {
+                crt = d.findTarget(request.preferredSource.fbp);
+                if (!crt)
+                    crt = d.findTarget(request.preferredSource.fbp / 32u);
+            }
             if (!crt)
+                crt = d.findTarget(cfbp);
+            if (!crt && request.hasPreferredSource)
+            {
+                crt = d.findTarget(request.preferredSource.fbp);
+                if (!crt)
+                    crt = d.findTarget(request.preferredSource.fbp / 32u);
+            }
+            if (!crt || (crt->usedW == 0 && crt->lastDrawSeq == 0))
             {
                 uint64_t bestSeq = 0;
                 for (const auto &t : d.targets)

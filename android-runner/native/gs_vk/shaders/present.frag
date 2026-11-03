@@ -19,5 +19,5 @@ void main()
     ivec2 size = textureSize(uSrc, 0);
     vec4 c = (p.x < size.x && p.y < size.y) ? texelFetch(uSrc, p, 0) : vec4(0.0);
     float a = (uSrcOffset.z != 0) ? 128.0 / 255.0 : c.a;
-    oColor = vec4(c.rgb, (uSrcOffset.w != 0) ? min(1.0, a * 2.0) : 1.0);
+    oColor = vec4(c.rgb, (uSrcOffset.w != 0) ? min(1.0, a * 2.0) : a);
 }

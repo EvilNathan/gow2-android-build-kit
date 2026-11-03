@@ -341,6 +341,8 @@ void ApplySettingsJson(const char* json)
         SetEnvVar("GOW2_BOOT_ELF", *bootElf);
     }
     SetEnvVar("GOW_PERF_DIAG", std::string("1"));
+    SetEnvVar("GOW_PERF_FRAME_PC", std::string("0x0014E380"));
+    SetEnvVar("GOW_GS_FINISH_ASINCRONO", std::string("1"));
 }
 
 void GameThreadMain()
