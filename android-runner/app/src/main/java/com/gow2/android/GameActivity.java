@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -82,6 +83,7 @@ public final class GameActivity extends Activity implements NativeBridge.RumbleS
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
 
         settings = Settings.fromJson(getIntent().getStringExtra(EXTRA_SETTINGS_JSON));
         padMapper = new PadMapper(new PadMapper.Sink() {

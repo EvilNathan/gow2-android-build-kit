@@ -1596,10 +1596,6 @@ GSVkBackend::Impl::Texture &GSVkBackend::Impl::uploadTexture(uint64_t key, uint3
     tex.lastUse = ++useCounter;
     if (tex.valid)
         return tex;
-    tex.width = w;
-    tex.height = h;
-    tex.blockLo = blockLo;
-    tex.blockHi = blockHi;
     // Reuse the previous image when size and format match: games invalidate and
     // re-upload textures every frame, and per-upload image+memory allocation
     // (and its driver-side bookkeeping) collapses the framerate.
@@ -1607,9 +1603,13 @@ GSVkBackend::Impl::Texture &GSVkBackend::Impl::uploadTexture(uint64_t key, uint3
     const bool reuse = tex.image != VK_NULL_HANDLE && tex.width == w && tex.height == h && tex.singleByte == wantR8;
     if (tex.image && !reuse)
     {
-        // stale image: recreate (size may have changed)
+        // stale image: recreate (size or format changed)
         trashTexture(tex);
     }
+    tex.width = w;
+    tex.height = h;
+    tex.blockLo = blockLo;
+    tex.blockHi = blockHi;
     tex.singleByte = wantR8;
     const VkDeviceSize bytes = singleByte ? static_cast<VkDeviceSize>(w) * h : static_cast<VkDeviceSize>(w) * h * 4;
     auto a = staging.alloc(bytes, 16);
@@ -2632,10 +2632,7 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
 
     // vertices: a GS line quad and sprite quads are all emitted as triangles
     VkDeviceSize voff = valloc.offset;
-    // draws that read the destination in the shader (DATE / Z alias / soft
-    // blend) must run in the pass that exposes it as an input attachment
-    const bool readsDest = date || zAlias || u.uSwBlend != 0;
-    const VkRenderPass drawRp = probeNoDepth ? rpClearColorOnly : (readsDest ? rpDraw : rpDrawNoInput);
+    const VkRenderPass drawRp = probeNoDepth ? rpClearColorOnly : rpDraw;
     const auto recordPass = [&](bool pass2)
     {
         beginFrameCb();
@@ -3232,11 +3229,16 @@ void GSVkBackend::Impl::ensureSwapchain()
     ci.imageFormat = swap.format;
     ci.imageColorSpace = formats[0].colorSpace;
 
+    VkSurfaceTransformFlagBitsKHR preTransform = caps.currentTransform;
+    if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+        preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+
     VkExtent2D extent = caps.currentExtent;
-    if (extent.width == 0xFFFFFFFF || extent.width == 0)
+    uint32_t w = sw > 0 ? static_cast<uint32_t>(sw) : 1280u;
+    uint32_t h = sh > 0 ? static_cast<uint32_t>(sh) : 720u;
+    if (extent.width == 0xFFFFFFFF || extent.width == 0 ||
+        (preTransform == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR && ((w > h && extent.width < extent.height) || (w < h && extent.width > extent.height))))
     {
-        uint32_t w = sw > 0 ? static_cast<uint32_t>(sw) : 1280u;
-        uint32_t h = sh > 0 ? static_cast<uint32_t>(sh) : 720u;
         extent.width = std::max(caps.minImageExtent.width, std::min(caps.maxImageExtent.width, w));
         extent.height = std::max(caps.minImageExtent.height, std::min(caps.maxImageExtent.height, h));
     }
@@ -3249,7 +3251,7 @@ void GSVkBackend::Impl::ensureSwapchain()
     ci.imageUsage = usage;
 
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    ci.preTransform = caps.currentTransform;
+    ci.preTransform = preTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     ci.clipped = VK_TRUE;
@@ -3559,7 +3561,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
             pi.pSwapchains = &d.swap.swapchain;
             pi.pImageIndices = &idx;
             VkResult presRes = gs_vk::vk.QueuePresentKHR(d.queue, &pi);
-            if (presRes == VK_ERROR_OUT_OF_DATE_KHR)
+            if (presRes == VK_ERROR_OUT_OF_DATE_KHR || presRes == VK_SUBOPTIMAL_KHR)
                 d.swap.needsRecreate = true;
 
             gs_vk::vk.WaitForFences(d.device, 1, &d.frameFence, VK_TRUE, 1000000000ull);
@@ -3578,6 +3580,10 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         }
         else
         {
+            if (acq == VK_ERROR_OUT_OF_DATE_KHR || acq == VK_SUBOPTIMAL_KHR)
+                d.swap.needsRecreate = true;
+            else
+                ps2x::host::Log("W/host/gs-vk", "AcquireNextImageKHR failed: %d", acq);
             d.cbOpen = false;
             d.cbState = Impl::CbState::Initial;
         }
