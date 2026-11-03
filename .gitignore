@@ -40,3 +40,6 @@ android-runner/native/gs_vk/_check/
 
 # compiled shader intermediates (embedded via cmake/embed_spirv.cmake)
 *.spv
+
+dummy/
+list/

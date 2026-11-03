@@ -610,6 +610,10 @@ bool GSVkBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
         return false;
     d.flushPending();
     GSVkBackend::Impl::RenderTarget &rt = d.target(context.frame.fbp, context.frame.fbw);
+    rt.psm = context.frame.psm;
+    rt.zbp = context.zbuf.zbp;
+    rt.usedW = std::max(rt.usedW, static_cast<uint32_t>(context.scissor.x1 + 1));
+    rt.usedH = std::max(rt.usedH, static_cast<uint32_t>(context.scissor.y1 + 1));
     std::fprintf(stderr, "[gs-vk] ClearFramebuffer: rt %ux%u\n", rt.pxW, rt.pxH);
     d.beginFrameCb();
     // colour-only render pass with a LOAD_OP_CLEAR (no depth attachment, no input attachment):
@@ -2205,6 +2209,8 @@ bool GSVkBackend::Impl::depthClearSprite(const GSDrawState &s, const GSPrimitive
     for (const auto &t : targets)
     {
         if (!t) continue;
+        if (t->zbp == ~0u && t->fbp == c.frame.fbp)
+            t->zbp = c.zbuf.zbp;
         int row = 0;
         any = any || depthRowOf(*t, c.frame.fbp, c.frame.fbw, c.frame.psm, row) ||
               (zWrites && depthRowOf(*t, c.zbuf.zbp, c.frame.fbw, c.zbuf.psm, row));
@@ -2257,6 +2263,8 @@ bool GSVkBackend::Impl::depthClearSprite(const GSDrawState &s, const GSPrimitive
     for (const auto &t : targets)
     {
         if (!t) continue;
+        if (t->zbp == ~0u && t->fbp == c.frame.fbp)
+            t->zbp = c.zbuf.zbp;
         int row = 0;
         if (depthRowOf(*t, c.frame.fbp, c.frame.fbw, c.frame.psm, row))
             clearRows(*t, row, frameZ, c.frame.psm);
@@ -2293,6 +2301,7 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
     if (failed)
         return;
     rt.psm = c.frame.psm;
+    rt.zbp = c.zbuf.zbp;
     ++rt.version;
     rt.lastDrawSeq = ++writeSeq;
     {
@@ -2836,6 +2845,8 @@ bool GSVkBackend::Impl::tryShuffle(const GSDrawState &s, const GSPrimitiveBatch 
         flushShuffle();
         dst = &target(c.frame.fbp, c.frame.fbw);
     }
+    dst->psm = c.frame.psm;
+    dst->zbp = c.zbuf.zbp;
     const uint32_t srcOwnerPsm = srcDepth ? 0x30u : 0x00u, srcFbp = srcDepth ? src->zbp : src->fbp;
     std::vector<ShuffleVertex> quads[4];
     uint32_t maxX = 0, maxY = 0;
@@ -3446,6 +3457,20 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         auto drawOne = [&](uint32_t cfbp, uint64_t dispfb, uint32_t cdbx, uint32_t cdby, bool alphaFactor, bool blendOver)
         {
             Impl::RenderTarget *crt = d.findTarget(cfbp);
+            if (!crt && request.hasPreferredSource)
+                crt = d.findTarget(request.preferredSource.fbp / 32u);
+            if (!crt)
+            {
+                uint64_t bestSeq = 0;
+                for (const auto &t : d.targets)
+                {
+                    if (t && t->usedW != 0u && t->lastDrawSeq > bestSeq)
+                    {
+                        bestSeq = t->lastDrawSeq;
+                        crt = t.get();
+                    }
+                }
+            }
             if (!crt)
             {
                 ps2x::host::Log("host/gs-vk", "drawCircuit: target fbp=%u not found!", cfbp);
