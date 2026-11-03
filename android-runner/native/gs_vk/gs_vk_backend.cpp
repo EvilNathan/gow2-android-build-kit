@@ -3267,6 +3267,11 @@ void GSVkBackend::Impl::ensureSwapchain()
     {
         ps2x::host::Log("E/host/gs-vk", "CreateSwapchainKHR failed: %d", scRes);
         swap.swapchain = VK_NULL_HANDLE;
+        if (swap.surface != VK_NULL_HANDLE)
+        {
+            gs_vk::vk.DestroySurfaceKHR(instance, swap.surface, nullptr);
+            swap.surface = VK_NULL_HANDLE;
+        }
         swap.ok = false;
         return;
     }
@@ -3561,8 +3566,14 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
             pi.pSwapchains = &d.swap.swapchain;
             pi.pImageIndices = &idx;
             VkResult presRes = gs_vk::vk.QueuePresentKHR(d.queue, &pi);
-            if (presRes == VK_ERROR_OUT_OF_DATE_KHR || presRes == VK_SUBOPTIMAL_KHR)
+            if (presRes == VK_ERROR_OUT_OF_DATE_KHR)
+            {
                 d.swap.needsRecreate = true;
+            }
+            else if (presRes != VK_SUCCESS && presRes != VK_SUBOPTIMAL_KHR)
+            {
+                ps2x::host::Log("W/host/gs-vk", "QueuePresentKHR failed: %d", presRes);
+            }
 
             gs_vk::vk.WaitForFences(d.device, 1, &d.frameFence, VK_TRUE, 1000000000ull);
             gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
@@ -3580,7 +3591,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         }
         else
         {
-            if (acq == VK_ERROR_OUT_OF_DATE_KHR || acq == VK_SUBOPTIMAL_KHR)
+            if (acq == VK_ERROR_OUT_OF_DATE_KHR)
                 d.swap.needsRecreate = true;
             else
                 ps2x::host::Log("W/host/gs-vk", "AcquireNextImageKHR failed: %d", acq);
