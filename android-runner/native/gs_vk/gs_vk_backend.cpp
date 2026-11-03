@@ -35,6 +35,16 @@
 namespace ps2x::host
 {
     inline void *NativeWindow() { return nullptr; }
+    inline void GetSurfaceSize(int &, int &) {}
+    inline void Log(const char *tag, const char *fmt, ...)
+    {
+        va_list args;
+        va_start(args, fmt);
+        std::fprintf(stderr, "[%s] ", tag);
+        std::vfprintf(stderr, fmt, args);
+        std::fprintf(stderr, "\n");
+        va_end(args);
+    }
 }
 #endif
 
@@ -256,6 +266,7 @@ struct GSVkBackend::Impl
     VkPipelineLayout drawPipelineLayout = VK_NULL_HANDLE;
 
     VkRenderPass rpDraw = VK_NULL_HANDLE;      // color LOAD + depth LOAD (+ input attachment)
+    VkRenderPass rpDrawNoInput = VK_NULL_HANDLE; // same, but no input attachment (draws that never read uDest)
     VkRenderPass rpClearColorOnly = VK_NULL_HANDLE; // color CLEAR, single attachment
     VkRenderPass rpClearColor = VK_NULL_HANDLE; // color CLEAR + depth LOAD
     VkRenderPass rpInitCD = VK_NULL_HANDLE;    // color CLEAR + depth CLEAR (target creation)
@@ -344,6 +355,7 @@ struct GSVkBackend::Impl
         VkImageView view = VK_NULL_HANDLE;
         uint32_t width = 0, height = 0;
         uint32_t blockLo = 0, blockHi = 0;
+        bool singleByte = false; // R8 (indices) vs RGBA8
         bool valid = false;
         uint64_t lastUse = 0;
     };
@@ -428,7 +440,6 @@ struct GSVkBackend::Impl
     void beginFrameCb();
     void endFrameCb();
     void submitAndWait();
-    void globalBarrier();
 
     VkPipeline pipeline(const PipelineKey &key);
     VkPipeline buildPipeline(const PipelineKey &key);
@@ -687,6 +698,15 @@ bool GSVkBackend::Impl::ensure()
     // the Android loader always has these.
     ii.enabledExtensionCount = 2;
     ii.ppEnabledExtensionNames = want;
+#else
+    // desktop probe: PS2X_VK_VALIDATION=1 opts into the Khronos validation layer
+    if (const char *val = std::getenv("PS2X_VK_VALIDATION"); val && *val == '1')
+    {
+        static const char *kValidation = "VK_LAYER_KHRONOS_validation";
+        ii.enabledLayerCount = 1;
+        ii.ppEnabledLayerNames = &kValidation;
+        std::fprintf(stderr, "[gs-vk] validation layer requested\n");
+    }
 #endif
     if (gs_vk::vk.CreateInstance(&ii, nullptr, &instance) != VK_SUCCESS)
         return fail("vkCreateInstance"), false;
@@ -848,7 +868,9 @@ bool GSVkBackend::Impl::createDeviceObjects()
 
     // shaders
     vsDraw = shader("draw.vert");
-    fsDraw = shader("draw.frag");
+    // devices without dualSrcBlend get the single-output build; all blended
+    // draws are routed to the software path in blendState()
+    fsDraw = shader(dualSrc ? "draw.frag" : "draw_nodual.frag");
     vsShuffle = shader("shuffle.vert");
     fsShuffle = shader("shuffle.frag");
     vsPresent = shader("present.vert");
@@ -888,7 +910,7 @@ bool GSVkBackend::Impl::createDeviceObjects()
     VkSubpassDependency extOut{0, VK_SUBPASS_EXTERNAL,
                                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                                VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, 0};
-    VkSubpassDependency deps[2] = {self, ext};
+    VkSubpassDependency deps[3] = {self, ext, extOut};
     {
         VkAttachmentDescription atts[2] = {attColor, attDepth};
         VkRenderPassCreateInfo ri{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
@@ -896,10 +918,29 @@ bool GSVkBackend::Impl::createDeviceObjects()
         ri.pAttachments = atts;
         ri.subpassCount = 1;
         ri.pSubpasses = &sub;
-        ri.dependencyCount = 2;
+        ri.dependencyCount = 3;
         ri.pDependencies = deps;
         if (gs_vk::vk.CreateRenderPass(device, &ri, nullptr, &rpDraw) != VK_SUCCESS)
             return fail("draw render pass"), false;
+    }
+    {
+        // draws that never read the destination (no DATE, no Z alias, no soft
+        // blend): no input attachment, no self dependency — shorter tile-memory
+        // dependency chains on tiling GPUs (Mali)
+        VkSubpassDescription subNoInput = sub;
+        subNoInput.inputAttachmentCount = 0;
+        subNoInput.pInputAttachments = nullptr;
+        VkSubpassDependency noDeps[2] = {ext, extOut};
+        VkAttachmentDescription atts[2] = {attColor, attDepth};
+        VkRenderPassCreateInfo ri{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+        ri.attachmentCount = 2;
+        ri.pAttachments = atts;
+        ri.subpassCount = 1;
+        ri.pSubpasses = &subNoInput;
+        ri.dependencyCount = 2;
+        ri.pDependencies = noDeps;
+        if (gs_vk::vk.CreateRenderPass(device, &ri, nullptr, &rpDrawNoInput) != VK_SUCCESS)
+            return fail("draw-noinput render pass"), false;
     }
     {
         VkAttachmentDescription atts[2] = {attColor, attDepth};
@@ -1120,8 +1161,10 @@ vi.image = tableImage;
         gs_vk::vk.CreateImageView(device, &vi, nullptr, &tableView);
 
         beginFrameCb();
-auto a = staging.alloc(data.size() * 2, 4);
-std::memcpy(a.cpu, data.data(), data.size() * 2);
+        auto a = staging.alloc(data.size() * 2, 4);
+        if (!a.cpu)
+            return fail("table staging"), false;
+        std::memcpy(a.cpu, data.data(), data.size() * 2);
         VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         bar.image = tableImage;
         bar.srcQueueFamilyIndex = bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1131,6 +1174,7 @@ std::memcpy(a.cpu, data.data(), data.size() * 2);
         bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         gs_vk::vk.CmdPipelineBarrier(frameCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
         VkBufferImageCopy cp{};
+        cp.bufferOffset = a.offset;
         cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         cp.imageExtent = {2048, rows, 1};
         gs_vk::vk.CmdCopyBufferToImage(frameCb, staging.buffer, tableImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
@@ -1240,14 +1284,6 @@ void GSVkBackend::Impl::submitAndWait()
         gs_vk::vk.ResetDescriptorPool(device, descPool, 0);
     rings.reset();
     emptyTrash();
-}
-
-void GSVkBackend::Impl::globalBarrier()
-{
-    VkMemoryBarrier bar{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    bar.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-    bar.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    gs_vk::vk.CmdPipelineBarrier(frameCb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &bar, 0, nullptr, 0, nullptr);
 }
 
 void GSVkBackend::Impl::trashTexture(Texture &tex)
@@ -1564,11 +1600,17 @@ GSVkBackend::Impl::Texture &GSVkBackend::Impl::uploadTexture(uint64_t key, uint3
     tex.height = h;
     tex.blockLo = blockLo;
     tex.blockHi = blockHi;
-    if (tex.image)
+    // Reuse the previous image when size and format match: games invalidate and
+    // re-upload textures every frame, and per-upload image+memory allocation
+    // (and its driver-side bookkeeping) collapses the framerate.
+    const bool wantR8 = singleByte;
+    const bool reuse = tex.image != VK_NULL_HANDLE && tex.width == w && tex.height == h && tex.singleByte == wantR8;
+    if (tex.image && !reuse)
     {
         // stale image: recreate (size may have changed)
         trashTexture(tex);
     }
+    tex.singleByte = wantR8;
     const VkDeviceSize bytes = singleByte ? static_cast<VkDeviceSize>(w) * h : static_cast<VkDeviceSize>(w) * h * 4;
     auto a = staging.alloc(bytes, 16);
     if (!a.cpu)
@@ -1584,42 +1626,48 @@ GSVkBackend::Impl::Texture &GSVkBackend::Impl::uploadTexture(uint64_t key, uint3
                     static_cast<const uint8_t *>(rgba) + static_cast<size_t>(y) * pitchBytes,
                     static_cast<size_t>(w) * (singleByte ? 1u : 4u));
 
-    VkImageCreateInfo imi{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    imi.imageType = VK_IMAGE_TYPE_2D;
-    imi.format = singleByte ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
-    imi.extent = {w, h, 1};
-    imi.mipLevels = imi.arrayLayers = 1;
-    imi.samples = VK_SAMPLE_COUNT_1_BIT;
-    imi.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imi.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    imi.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (gs_vk::vk.CreateImage(device, &imi, nullptr, &tex.image) != VK_SUCCESS)
-        return tex;
-    VkMemoryRequirements req{};
-    gs_vk::vk.GetImageMemoryRequirements(device, tex.image, &req);
-    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    ai.allocationSize = req.size;
-    ai.memoryTypeIndex = memoryType(req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (gs_vk::vk.AllocateMemory(device, &ai, nullptr, &tex.mem) != VK_SUCCESS)
-        return tex;
-    gs_vk::vk.BindImageMemory(device, tex.image, tex.mem, 0);
-    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    vi.image = tex.image;
-    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    vi.format = imi.format;
-    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    gs_vk::vk.CreateImageView(device, &vi, nullptr, &tex.view);
+    if (!reuse)
+    {
+        VkImageCreateInfo imi{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        imi.imageType = VK_IMAGE_TYPE_2D;
+        imi.format = singleByte ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+        imi.extent = {w, h, 1};
+        imi.mipLevels = imi.arrayLayers = 1;
+        imi.samples = VK_SAMPLE_COUNT_1_BIT;
+        imi.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imi.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        imi.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (gs_vk::vk.CreateImage(device, &imi, nullptr, &tex.image) != VK_SUCCESS)
+            return tex;
+        VkMemoryRequirements req{};
+        gs_vk::vk.GetImageMemoryRequirements(device, tex.image, &req);
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = memoryType(req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (gs_vk::vk.AllocateMemory(device, &ai, nullptr, &tex.mem) != VK_SUCCESS)
+            return tex;
+        gs_vk::vk.BindImageMemory(device, tex.image, tex.mem, 0);
+        VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vi.image = tex.image;
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vi.format = imi.format;
+        vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        gs_vk::vk.CreateImageView(device, &vi, nullptr, &tex.view);
+    }
 
     beginFrameCb();
     VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     bar.image = tex.image;
     bar.srcQueueFamilyIndex = bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    // a reused image still carries SHADER_READ_ONLY; a fresh one starts UNDEFINED
+    bar.oldLayout = reuse ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
     bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    bar.srcAccessMask = reuse ? VK_ACCESS_SHADER_READ_BIT : 0;
     bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    gs_vk::vk.CmdPipelineBarrier(frameCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
+    gs_vk::vk.CmdPipelineBarrier(frameCb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
     VkBufferImageCopy cp{};
+    cp.bufferOffset = a.offset; // the data was written here, not at offset 0
     cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     cp.imageExtent = {w, h, 1};
     gs_vk::vk.CmdCopyBufferToImage(frameCb, staging.buffer, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
@@ -2112,8 +2160,8 @@ void GSVkBackend::Impl::blendState(const GSDrawState &s, bool &enabled, uint32_t
     else if (a == 2 && b == 0 && d == 2) { sf = kZero; df = kZero; }
     else if (a == 2 && b == 0 && d == 1) { sf = cs; df = kOne; equation = kFuncReverseSubtract; }
     else { soft = true; sf = cs; df = cd; }
-    if (!dualSrc && (cs == kSrc1Alpha || cd == kOneMinusSrc1Alpha))
-        soft = true;
+    if (!dualSrc)
+        soft = true; // no second blending output: fixed-function c==0/c==2 blends cannot run
 }
 
 bool GSVkBackend::Impl::isZInversion(const GSDrawState &s, const std::vector<HwVertex> &verts)
@@ -2557,6 +2605,12 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
         depthCompare = ztst == 0 ? VK_COMPARE_OP_NEVER : ztst == 1 ? VK_COMPARE_OP_ALWAYS : ztst == 2 ? (zInv ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_GREATER_OR_EQUAL) : (zInv ? VK_COMPARE_OP_LESS : VK_COMPARE_OP_GREATER);
     }
 
+    // PS2X_VK_NO_DEPTH=1 (probe diagnostic): route draws through the depthless
+    // colour-only pass so a broken depth-attachment path shows itself
+    static const bool probeNoDepth = [] {
+        const char *v = std::getenv("PS2X_VK_NO_DEPTH");
+        return v && *v == '1';
+    }();
     const auto makeKey = [&](bool blendEnable, uint32_t sfk, uint32_t dfk, uint32_t eq, bool depthWrite, uint32_t wmask, bool secondPass)
     {
         PipelineKey key{};
@@ -2567,8 +2621,10 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
         key.srcAlpha = VK_BLEND_FACTOR_ONE;
         key.dstAlpha = VK_BLEND_FACTOR_ZERO;
         key.equation = eq;
-        key.depthTest = zAlias ? 0u : 1u; // ZTE=0 is no depth test on the GS: ALWAYS (a write still lands)
-        key.depthWrite = depthWrite && !zAlias ? 1u : 0u;
+        // PS2X_VK_NO_DEPTH=1 (probe diagnostic): the depthless colour-only pass
+        // is in use, so the pipeline must not enable depth either
+        key.depthTest = (zAlias || probeNoDepth) ? 0u : 1u; // ZTE=0 is no depth test on the GS: ALWAYS (a write still lands)
+        key.depthWrite = depthWrite && !zAlias && !probeNoDepth ? 1u : 0u;
         key.depthCompare = key.depthTest ? depthCompare : VK_COMPARE_OP_ALWAYS;
         key.writeMask = wmask;
         return key;
@@ -2576,12 +2632,16 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
 
     // vertices: a GS line quad and sprite quads are all emitted as triangles
     VkDeviceSize voff = valloc.offset;
+    // draws that read the destination in the shader (DATE / Z alias / soft
+    // blend) must run in the pass that exposes it as an input attachment
+    const bool readsDest = date || zAlias || u.uSwBlend != 0;
+    const VkRenderPass drawRp = probeNoDepth ? rpClearColorOnly : (readsDest ? rpDraw : rpDrawNoInput);
     const auto recordPass = [&](bool pass2)
     {
         beginFrameCb();
         VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-        rb.renderPass = rpDraw;
-        rb.framebuffer = rt.fb;
+        rb.renderPass = drawRp;
+        rb.framebuffer = probeNoDepth ? rt.fbColorOnly : rt.fb;
         rb.renderArea.extent = {rt.pxW, rt.pxH};
         gs_vk::vk.CmdBeginRenderPass(frameCb, &rb, VK_SUBPASS_CONTENTS_INLINE);
         VkViewport viewport{0.0f, 0.0f, static_cast<float>(rt.pxW), static_cast<float>(rt.pxH), 0.0f, 1.0f};
@@ -2600,11 +2660,15 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
         if (softBlend && !zAliasWrite && (s.colclamp & 1u) == 0u)
         {
             // the shader reads the destination: one triangle at a time so overlapping triangles of one draw see each
-            // other's results like on the GS (the shadow volumes count overlaps this way)
+            // other's results like on the GS (the shadow volumes count overlaps this way). The barrier matches the
+            // by-region self-dependency of rpDraw exactly — the only form Vulkan allows inside a render pass.
+            VkMemoryBarrier fbBar{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            fbBar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            fbBar.dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
             for (size_t i = 0; i + 3 <= dverts.size(); i += 3)
             {
                 if (i != 0)
-                    globalBarrier();
+                    gs_vk::vk.CmdPipelineBarrier(frameCb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 1, &fbBar, 0, nullptr, 0, nullptr);
                 gs_vk::vk.CmdDraw(frameCb, 3, 1, static_cast<uint32_t>(i), 0);
             }
         }
@@ -2641,7 +2705,7 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
             gs_vk::vk.UpdateDescriptorSets(device, 7, writes2, 0, nullptr);
 
             VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-            rb.renderPass = rpDraw;
+            rb.renderPass = drawRp;
             rb.framebuffer = rt.fb;
             rb.renderArea.extent = {rt.pxW, rt.pxH};
             gs_vk::vk.CmdBeginRenderPass(frameCb, &rb, VK_SUBPASS_CONTENTS_INLINE);
@@ -2660,7 +2724,7 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
             gs_vk::vk.CmdEndRenderPass(frameCb);
         }
     }
-    globalBarrier();
+    // (render pass → later work ordering is provided by the draw pass's external-out dependency)
 }
 
 // ==== channel shuffles (see shaders/shuffle.*) =====================================================
@@ -2918,7 +2982,7 @@ void GSVkBackend::Impl::flushShuffle()
         gs_vk::vk.CmdBindPipeline(frameCb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline(key));
         gs_vk::vk.CmdDraw(frameCb, vertexCount, 1, 0, 0);
         gs_vk::vk.CmdEndRenderPass(frameCb);
-        globalBarrier();
+        // (ordering to later work comes from rpDraw's external-out dependency)
     }
     (void)srcInfo;
     (void)destInfo;
@@ -2942,6 +3006,8 @@ void GSVkBackend::Impl::uploadPaletteImage(const GSDrawState &s)
         submitAndWait();
         staging.reset();
         a = staging.alloc(256 * 4, 16);
+        if (!a.cpu)
+            return;
     }
     std::memcpy(a.cpu, colors, 256 * 4);
     VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -2954,6 +3020,7 @@ void GSVkBackend::Impl::uploadPaletteImage(const GSDrawState &s)
     bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     gs_vk::vk.CmdPipelineBarrier(frameCb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
     VkBufferImageCopy cp{};
+    cp.bufferOffset = a.offset; // the palette was written here, not at offset 0
     cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     cp.imageExtent = {256, 1, 1};
     gs_vk::vk.CmdCopyBufferToImage(frameCb, staging.buffer, paletteTex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);

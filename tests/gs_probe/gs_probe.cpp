@@ -126,7 +126,9 @@ int main(int argc, char **argv)
                 const size_t stride = std::max(640u, f.width) * 4u;
                 const uint8_t *px = f.pixels.data() + 8 * stride + 8 * 4;
                 std::printf("    corner px: %u %u %u %u\n", px[0], px[1], px[2], px[3]);
-                expect(px[0] == 0x40 && px[1] == 0x80 && px[2] == 0xC0, "corner pixel is the clear colour");
+                // ClearFramebuffer takes the colour as RGBA in little-endian
+                // byte order: 0x4080C0FF = R 255, G 192, B 128
+                expect(px[0] == 0xFF && px[1] == 0xC0 && px[2] == 0x80, "corner pixel is the clear colour");
                 expect(px[3] == 0xFF, "alpha forced to 255");
             }
         }
@@ -142,9 +144,14 @@ int main(int argc, char **argv)
             {
                 const size_t stride = std::max(640u, f.width) * 4u;
                 const uint8_t *inside = f.pixels.data() + 24 * stride + 24 * 4;
+                const uint8_t *insideEdge = f.pixels.data() + 9 * stride + 17 * 4;
+                const uint8_t *rightOfSprite = f.pixels.data() + 20 * stride + 60 * 4;
                 const uint8_t *outside = f.pixels.data() + 60 * stride + 100 * 4;
-                std::printf("    inside px: %u %u %u %u / outside: %u %u %u %u\n",
-                            inside[0], inside[1], inside[2], inside[3], outside[0], outside[1], outside[2], outside[3]);
+                std::printf("    inside px: %u %u %u %u / inside-edge: %u %u %u %u / right-of: %u %u %u %u / outside: %u %u %u %u\n",
+                            inside[0], inside[1], inside[2], inside[3],
+                            insideEdge[0], insideEdge[1], insideEdge[2], insideEdge[3],
+                            rightOfSprite[0], rightOfSprite[1], rightOfSprite[2], rightOfSprite[3],
+                            outside[0], outside[1], outside[2], outside[3]);
                 expect(inside[1] > 200u && inside[0] < 60u, "inside the sprite is green");
                 expect(outside[0] < 40u && outside[1] < 40u && outside[2] < 40u, "outside stays (near) black");
             }

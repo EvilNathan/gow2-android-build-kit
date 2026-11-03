@@ -114,3 +114,52 @@ Notes:
   ends and submits its command buffer, `GpuRing::alloc` failure is guarded.
 - Real-pixel validation is a device task (TASKS.md M2 bring-up): the software
   rasterizers on this machine are not a reference for the Adreno/Mali path.
+
+## Session 2026-11-03 — device black screen triage (log v0.4.7-m2, Mali-G610)
+Device log (`gow2.log` from release v0.4.7-m2 of EvilNathan/gow2-android-apk):
+boot OK (ELF + 8 IRX modules + pads + AAudio), swapchain OK (1280x720, 4 images),
+`Frame N presented OK (fbp=232 … ok1=1)` while `host_hz` collapsed 28 → 0.4 and
+`gs_ms` absorbed 75–100% of the window — the presentation pipeline ran but drew
+black.
+
+Root causes fixed in `android-runner/native/gs_vk/gs_vk_backend.cpp`:
+1. **Texture/palette uploads read staging offset 0** — `uploadTexture` memcpy'd
+   the decoded rows to `staging.alloc(bytes)` but left `VkBufferImageCopy.bufferOffset`
+   zeroed, so every `CmdCopyBufferToImage` copied GS page-table bytes from the
+   start of the staging buffer instead of the texture data; same bug in
+   `uploadPaletteImage` (CLUT) and the format-table upload. On-device the GS
+   tables decode as near-zero alpha for every texel → alpha test / blend
+   discards everything → black screen. The offscreen probe never caught it
+   because its first upload happened to land at offset 0.
+2. **Per-upload `vkCreateImage` + `vkAllocateMemory`** — games invalidate and
+   re-upload textures continuously; each re-upload allocated and freed a
+   device image (and freed it through the trash on Mali) → driver churn that
+   matches the gs_ms collapse. Textures now reuse their image when size and
+   format still match.
+3. **Illegal full barriers inside the render pass** — the soft-blend
+   triangle-by-triangle loop emitted a `globalBarrier()` (ALL_COMMANDS,
+   memory↔memory, no by-region) between `CmdDraw`s *inside* a render pass,
+   and every draw ended with one after `CmdEndRenderPass`. Replaced with the
+   spec-legal form: by-region COLOR_ATTACHMENT_WRITE → INPUT_ATTACHMENT_READ
+   between triangles, and an external-out dependency (added to rpDraw +
+   rpClearColor/rpInitCD already had one) for pass→later-work ordering.
+4. **Draw pass split** — draws that never read the destination (no DATE, no
+   Z alias, no soft blend — the majority) now run in `rpDrawNoInput`
+   (no input attachment, no self dependency), shortening tile-memory
+   dependency chains on tiling GPUs (Mali).
+5. **`draw_nodual.frag`** — devices without `dualSrcBlend` (SwiftShader and
+   older mobile drivers) previously built pipelines that declared a second
+   blending output; they now use a single-output build of `draw.frag`
+   (`-DKS_VK_NO_DUAL_SRC`, selected when `dualSrc == false`) and `blendState`
+   routes every fixed-function blend to the software path.
+6. Probe repair: desktop `ps2x::host::Log` stub now prints to stderr (pipeline
+   build failures were being swallowed), the clear-case expectation was fixed
+   to the little-endian RGBA byte order the backend actually uses
+   (`0x4080C0FF` = R255 G192 B128), `PS2X_VK_VALIDATION=1` opts into the
+   Khronos validation layer on desktop, and `PS2X_VK_NO_DEPTH=1` routes draws
+   through the depthless pass for bisecting.
+| Check | Command | Result |
+| --- | --- | --- |
+| Probe builds | `.\scripts\build-gs-probe.ps1 -NoRun` | **pass** (clang, backend + engine GS + 7 SPIR-V blobs) |
+| Probe `clear` | `gs_probe.exe clear` (SwiftShader ×4 builds) | **pass** — corner pixel (255,192,128,255), alpha forced |
+| Probe `sprite`/`transfer` | same | still black on every SwiftShader build on this VM — pre-existing (see TASKS.md gate), needs a device or a healthy ICD to judge; the depth/input-attachment bisect flags above came out of it |

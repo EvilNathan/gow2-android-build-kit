@@ -42,6 +42,10 @@ $glslc = 'C:\Android\android-sdk\ndk\27.3.13750724\shader-tools\windows-x86_64\g
 Get-ChildItem (Join-Path $RepoRoot 'android-runner\native\gs_vk\shaders') -Include '*.vert', '*.frag' -File -Recurse | ForEach-Object {
     & $glslc --target-env=vulkan1.1 -o (Join-Path $spvDir ($_.Name + '.spv')) $_.FullName
     if ($LASTEXITCODE -ne 0) { throw "shader failed: $($_.Name)" }
+    if ($_.Name -eq 'draw.frag') {
+        & $glslc --target-env=vulkan1.1 -DKS_VK_NO_DUAL_SRC -o (Join-Path $spvDir 'draw_nodual.frag.spv') $_.FullName
+        if ($LASTEXITCODE -ne 0) { throw 'shader failed: draw_nodual.frag' }
+    }
 }
 & cmake "-DSPV_DIR=$spvDir" "-DOUT_CPP=$(Join-Path $genRoot 'gs_vk_shaders_generated.cpp')" "-DOUT_H=$(Join-Path $genRoot 'gs_vk_shaders_generated.h')" -P (Join-Path $RepoRoot 'cmake\embed_spirv.cmake')
 if ($LASTEXITCODE -ne 0) { throw 'SPIR-V embedding failed' }

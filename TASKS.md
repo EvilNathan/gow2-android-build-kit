@@ -113,15 +113,21 @@ and device bring-up remain)._
 
 ## Open TODOs (ordered, for the next session)
 
-1. **Device bring-up with the Vulkan APK** (user-driven): install
-   `dist/gow2-android-debug.apk`, import the ISO, logcat, screenshot,
-   `selftest-*.zip`. The launcher activity is `com.gow2.android/.MainActivity`;
-   place the ISO via the in-app import or `scripts/push-game-data.ps1`. Fix
-   whatever the Adreno/Mali path disagrees with — SwiftShader could not serve
-   as a pixel reference on the CI VM (see `VERIFICATION.md`).
+1. **Device re-test after the 2026-11-03 black-screen fixes** (user-driven):
+   install the new `dist/gow2-android-debug.apk`, import the ISO, capture
+   `gow2.log` + screenshot on the Mali-G610 device. Expectation: textures now
+   upload from the correct staging offset (the log's black screen with
+   `presented OK` was corrupt texture/CLUT uploads), FPS no longer collapses
+   to 0.4 host_hz (image reuse + legal in-pass barriers). If pixels appear,
+   move on to comparing against the PC OpenGL renderer.
 2. **Pixel-exact probe cases on a device or a working desktop ICD**: run
    `gs_probe` (`scripts/build-gs-probe.ps1`) where the Vulkan implementation
-   does not trap; the harness reports per-case verdicts.
+   does not trap; the harness reports per-case verdicts. `clear` passes on
+   this VM now; `sprite`/`transfer` still draw black on every available
+   SwiftShader build (4 tried, incl. the nodual shader path) — treat the VM's
+   SwiftShader as unusable for draw-path validation until an ICD that passes
+   `clear`+`sprite` is found (diagnostic env flags: `PS2X_VK_VALIDATION=1`,
+   `PS2X_VK_NO_DEPTH=1`).
 3. **PC capture pass** for native VU1/IOP (`GOW_VU1_CAPTURA`, IOP module dump),
    then `scripts/gen-native.ps1`, then measure the FPS gain on the desktop
    runner before trusting it on the phone.

@@ -11,8 +11,16 @@ layout(location = 2) noperspective in vec3 vSTQ;
 layout(location = 3) noperspective in vec2 vUV;
 layout(location = 4) flat in vec4 vUVClamp;
 
+// KS_VK_NO_DUAL_SRC (the draw_nodual.frag.spv build of this file): devices
+// without dualSrcBlend get a single output; blended draws take the software
+// path (uSwBlend), which never reads oBlend.
+
+#ifdef KS_VK_NO_DUAL_SRC
+layout(location = 0) out vec4 oColor;
+#else
 layout(location = 0, index = 0) out vec4 oColor;
 layout(location = 0, index = 1) out vec4 oBlend;
+#endif
 
 layout(set = 0, binding = 0) uniform sampler2D uTex;
 layout(set = 0, binding = 1, input_attachment_index = 0) uniform subpassInput uDest;
@@ -297,6 +305,8 @@ void main()
     if (uZAlias != 0 && uZAliasWrite != 0)
         rgb = vec3(float(zFrag & 255u), float((zFrag >> 8) & 255u), float((zFrag >> 16) & 255u));
     oColor = vec4(rgb / 255.0, a / 255.0);
+#ifndef KS_VK_NO_DUAL_SRC
     float f = min(a * uBlendScale, 1.0);
     oBlend = vec4(f);
+#endif
 }
