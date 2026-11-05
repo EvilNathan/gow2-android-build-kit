@@ -74,6 +74,33 @@ live in [`docs/ANDROID.md`](docs/ANDROID.md).
 By default `build-android.ps1` compiles the **Vulkan GS** backend (pass
 `-NullGs:$true` for the headless no-op-GS build used by M1 boot tests).
 
+### Linux
+
+Every script also ships as a Bash port next to the `.ps1` (`scripts/*.sh`,
+same steps, guards and outputs; the PowerShell scripts remain the Windows
+entry points). Prerequisites are the same as above minus Visual Studio:
+JDK 17, Android SDK platform 35, **NDK 27.3.13750724**, CMake 3.24+,
+Ninja (or Make), clang (only for `build-gs-probe.sh`), Git, Python 3.10+.
+The SDK is located via `ANDROID_HOME`/`ANDROID_SDK_ROOT`, defaulting to
+`~/Android/Sdk`.
+
+```bash
+./scripts/setup.sh
+./scripts/build-tools.sh
+./scripts/extract-disc.sh --iso "/path/to/God of War II (USA).iso"
+./scripts/recompile.sh
+./scripts/build-android.sh --install
+./scripts/verify-android.sh
+./scripts/push-game-data.sh
+./scripts/run-headless.sh --android --seconds 60
+```
+
+`./scripts/build-all.sh --iso <iso>` chains the same steps, and the flags
+mirror the PowerShell parameters (`--configuration`, `--null-gs`, `--clean`,
+`--sync-only`, `--no-run`, …). Host tools build with CMake + Ninja/Make
+instead of MSVC, so executables land in `build/<subdir>/` with no `Release/`
+folder and no `.exe` suffix.
+
 ## How it works
 
 1. `tools/iso_extract.py` lists the ISO9660 tree and copies just
