@@ -447,7 +447,9 @@ struct GSVkBackend::Impl
     uint64_t submitSerial = 0;
     std::vector<std::string> submitEvents;
     uint32_t submitEventsDropped = 0;
+    uint32_t submitSummariesPrinted = 0;
     void noteSubmitEvent(const char *text);
+    void logSubmitSummary(const char *tag, uint64_t serial);
     bool createDeviceObjects();
     void destroyDeviceObjects();
     uint32_t memoryType(VkMemoryRequirements req, VkMemoryPropertyFlags props) const;
@@ -719,10 +721,29 @@ bool GSVkBackend::Impl::waitFrameFence(const char *where, uint64_t timeoutNs)
 
 void GSVkBackend::Impl::noteSubmitEvent(const char *text)
 {
-    if (submitEvents.size() < 48u)
+    if (submitEvents.size() < 96u)
         submitEvents.emplace_back(text);
     else
         ++submitEventsDropped;
+}
+
+void GSVkBackend::Impl::logSubmitSummary(const char *tag, uint64_t serial)
+{
+    std::string summary;
+    for (const std::string &e : submitEvents)
+    {
+        summary += " | ";
+        summary += e;
+    }
+    if (submitEventsDropped != 0u)
+        summary += " | (+" + std::to_string(submitEventsDropped) + " more)";
+    submitEvents.clear();
+    submitEventsDropped = 0;
+    if (submitSummariesPrinted < 600u)
+    {
+        ++submitSummariesPrinted;
+        ps2x::host::Log("host/gs-vk", "%s #%llu:%s", tag, static_cast<unsigned long long>(serial), summary.c_str());
+    }
 }
 
 bool GSVkBackend::Impl::ensure()
@@ -1324,20 +1345,7 @@ void GSVkBackend::Impl::submitAndWait()
         su.commandBufferCount = 1;
         su.pCommandBuffers = &frameCb;
         ++submitSerial;
-        if (submitSerial <= 500u)
-        {
-            std::string summary;
-            for (const std::string &e : submitEvents)
-            {
-                summary += " | ";
-                summary += e;
-            }
-            if (submitEventsDropped != 0u)
-                summary += " | (+" + std::to_string(submitEventsDropped) + " more)";
-            ps2x::host::Log("host/gs-vk", "submit #%llu:%s", static_cast<unsigned long long>(submitSerial), summary.c_str());
-        }
-        submitEvents.clear();
-        submitEventsDropped = 0;
+        logSubmitSummary("submit", submitSerial);
         gs_vk::vk.ResetFences(device, 1, &frameFence);
         gs_vk::vk.QueueSubmit(queue, 1, &su, frameFence);
         if (!waitFrameFence("submitAndWait"))
@@ -1690,6 +1698,12 @@ GSVkBackend::Impl::Texture &GSVkBackend::Impl::uploadTexture(uint64_t key, uint3
     tex.blockHi = blockHi;
     tex.singleByte = wantR8;
     const VkDeviceSize bytes = singleByte ? static_cast<VkDeviceSize>(w) * h : static_cast<VkDeviceSize>(w) * h * 4;
+    {
+        char ev[128];
+        std::snprintf(ev, sizeof(ev), "upload tex %ux%u bytes=%llu r8=%d blocks=%u-%u", w, h,
+                      static_cast<unsigned long long>(bytes), singleByte ? 1 : 0, blockLo, blockHi);
+        noteSubmitEvent(ev);
+    }
     auto a = staging.alloc(bytes, 16);
     if (!a.cpu)
     {
@@ -3663,6 +3677,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
     VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     su.commandBufferCount = 1;
     su.pCommandBuffers = &d.frameCb;
+    d.logSubmitSummary("present-readback", static_cast<uint64_t>(d.presentCount));
     gs_vk::vk.ResetFences(d.device, 1, &d.frameFence);
     gs_vk::vk.QueueSubmit(d.queue, 1, &su, d.frameFence);
     if (!d.waitFrameFence("present-readback"))
@@ -3742,6 +3757,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
             psu.pCommandBuffers = &d.frameCb;
             psu.signalSemaphoreCount = 1;
             psu.pSignalSemaphores = &d.swap.rendered;
+            d.logSubmitSummary("present-window", static_cast<uint64_t>(d.presentCount));
             gs_vk::vk.ResetFences(d.device, 1, &d.frameFence);
             gs_vk::vk.QueueSubmit(d.queue, 1, &psu, d.frameFence);
             VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
