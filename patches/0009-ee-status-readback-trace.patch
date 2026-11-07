@@ -1,0 +1,37 @@
+diff --git a/ps2xIOP/src/emulator/services/iop_rpc.cpp b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+--- a/ps2xIOP/src/emulator/services/iop_rpc.cpp
++++ b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+@@ -139,6 +139,33 @@
+                             out << ' ' << word;
+                         }
+                     }
++                    // GOW-Android diagnostic (kit patch 0009): read the EE side back
++                    // through the host adapter: the status-block pointer the EE
++                    // loader itself loads from EE 0x2D7A24 (FUN_0017f170), the
++                    // slot-0 status word seen through that pointer, the same word
++                    // at the DMA target address, and the loader pause counter at
++                    // EE 0x2D8154. Diag3 proved the DMA payload carries bit 0x2000;
++                    // this shows whether the block the EE polls is the block SMPD
++                    // writes, and whether the pause counter ever drops.
++                    if (transfer.destination == 0x338540u && transfer.size >= 0x198u)
++                    {
++                        const auto readWord = [&](uint32_t address) -> uint32_t
++                        {
++                            uint8_t bytes[4] = {};
++                            if (!m_host.readGuest(address, bytes, sizeof(bytes)))
++                                return 0xDEAD0000u;
++                            return static_cast<uint32_t>(bytes[0]) |
++                                   (static_cast<uint32_t>(bytes[1]) << 8) |
++                                   (static_cast<uint32_t>(bytes[2]) << 16) |
++                                   (static_cast<uint32_t>(bytes[3]) << 24);
++                        };
++                        const uint32_t eeBlockPtr = readWord(0x2D7A24u);
++                        const uint32_t eeSlotWord = eeBlockPtr != 0u ? readWord((eeBlockPtr & 0x1FFFFFFFu) + 0x114u) : 0u;
++                        const uint32_t dmaSlotWord = readWord(0x338540u + 0x114u);
++                        const uint32_t eePause = readWord(0x2D8154u);
++                        out << " eeptr=" << eeBlockPtr << " eeslot=" << eeSlotWord
++                            << " dmaslot=" << dmaSlotWord << " pause=" << eePause;
++                    }
+                     m_host.log(LogLevel::Info, out.str());
+                 }
+                 if (!writeOk)
