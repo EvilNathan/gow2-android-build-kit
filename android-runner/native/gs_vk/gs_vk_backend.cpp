@@ -440,6 +440,14 @@ struct GSVkBackend::Impl
     bool gpuStalled = false;
     void stallGpu(const char *where, VkResult res);
     bool waitFrameFence(const char *where, uint64_t timeoutNs = 1000000000ull);
+    // Submission tracing: a compact description of every draw/shuffle recorded
+    // since the previous queue submission, printed with the submission serial
+    // in submitAndWait. If a submission wedges, the last printed composition
+    // before the "GPU stall" line identifies its contents.
+    uint64_t submitSerial = 0;
+    std::vector<std::string> submitEvents;
+    uint32_t submitEventsDropped = 0;
+    void noteSubmitEvent(const char *text);
     bool createDeviceObjects();
     void destroyDeviceObjects();
     uint32_t memoryType(VkMemoryRequirements req, VkMemoryPropertyFlags props) const;
@@ -707,6 +715,14 @@ bool GSVkBackend::Impl::waitFrameFence(const char *where, uint64_t timeoutNs)
         return false;
     }
     return true;
+}
+
+void GSVkBackend::Impl::noteSubmitEvent(const char *text)
+{
+    if (submitEvents.size() < 48u)
+        submitEvents.emplace_back(text);
+    else
+        ++submitEventsDropped;
 }
 
 bool GSVkBackend::Impl::ensure()
@@ -1307,6 +1323,21 @@ void GSVkBackend::Impl::submitAndWait()
         VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         su.commandBufferCount = 1;
         su.pCommandBuffers = &frameCb;
+        ++submitSerial;
+        if (submitSerial <= 500u)
+        {
+            std::string summary;
+            for (const std::string &e : submitEvents)
+            {
+                summary += " | ";
+                summary += e;
+            }
+            if (submitEventsDropped != 0u)
+                summary += " | (+" + std::to_string(submitEventsDropped) + " more)";
+            ps2x::host::Log("host/gs-vk", "submit #%llu:%s", static_cast<unsigned long long>(submitSerial), summary.c_str());
+        }
+        submitEvents.clear();
+        submitEventsDropped = 0;
         gs_vk::vk.ResetFences(device, 1, &frameFence);
         gs_vk::vk.QueueSubmit(queue, 1, &su, frameFence);
         if (!waitFrameFence("submitAndWait"))
@@ -2347,6 +2378,15 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
     RenderTarget &rt = target(c.frame.fbp, c.frame.fbw);
     if (failed)
         return;
+    {
+        char ev[192];
+        std::snprintf(ev, sizeof(ev), "draw prim=%d tme=%d abe=%d verts=%zu fbp=%u fbw=%u fpsm=%u zbp=%u tbp=%u tpsm=%u twh=%ux%u",
+                      static_cast<int>(s.prim.type), s.prim.tme ? 1 : 0, s.prim.abe ? 1 : 0, verts.size(),
+                      c.frame.fbp, c.frame.fbw, static_cast<unsigned>(c.frame.psm), c.zbuf.zbp,
+                      c.tex0.tbp0, static_cast<unsigned>(c.tex0.psm),
+                      static_cast<unsigned>(s.textureWidth), static_cast<unsigned>(s.textureHeight));
+        noteSubmitEvent(ev);
+    }
     rt.psm = c.frame.psm;
     rt.zbp = c.zbuf.zbp;
     ++rt.version;
@@ -2941,6 +2981,13 @@ void GSVkBackend::Impl::flushShuffle()
     haveShuffle = false;
     RenderTarget &dst = *shuffleDst, &src = *shuffleSrc;
     const GSContext &c = shuffleState.context;
+    {
+        char ev[128];
+        std::snprintf(ev, sizeof(ev), "shuffle dstfbp=%u srctbp=%u srcz=%d fpsm=%u tpsm=%u",
+                      c.frame.fbp, c.tex0.tbp0, shuffleSrcZ ? 1 : 0,
+                      static_cast<unsigned>(c.frame.psm), static_cast<unsigned>(c.tex0.psm));
+        noteSubmitEvent(ev);
+    }
     ++dst.version;
     dst.lastDrawSeq = ++writeSeq;
     const uint32_t m16 = fbmsk16(c.frame.fbmsk);
