@@ -1,0 +1,16 @@
+diff --git a/ps2xIOP/src/native/iop_native_overrides.cpp b/ps2xIOP/src/native/iop_native_overrides.cpp
+index 192efb6..26dd40d 100644
+--- a/ps2xIOP/src/native/iop_native_overrides.cpp
++++ b/ps2xIOP/src/native/iop_native_overrides.cpp
+@@ -179,7 +179,10 @@ namespace ps2x::iop::detail
+         }
+ 
+         // GOW_SND_DIAG=1: logs the core-input stream calls and MMIX/BVOL/MVOL writes (movie audio investigation)
+-        const bool g_sndDiag = std::getenv("GOW_SND_DIAG") != nullptr;
++        // GOW-Android diagnostic build (kit patch 0006): default ON. This namespace-scope initializer
++        // runs when the library loads, before the Android host can setenv, so a host-side default
++        // cannot reach it; an explicit GOW_SND_DIAG=0 in the environment turns it back off.
++        const bool g_sndDiag = [] { const char *v = std::getenv("GOW_SND_DIAG"); return v == nullptr || v[0] != '0'; }();
+ 
+         void sdSetParam(IopNativeCall &c)
+         {

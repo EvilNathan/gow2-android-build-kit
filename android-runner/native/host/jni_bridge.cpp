@@ -343,6 +343,20 @@ void ApplySettingsJson(const char* json)
     SetEnvVar("GOW_PERF_DIAG", std::string("1"));
     SetEnvVar("GOW_PERF_FRAME_PC", std::string("0x0014E380"));
     SetEnvVar("GOW_GS_FINISH_ASINCRONO", std::string("1"));
+    // Diagnostic build (kit patch 0006): IOP traces for the SCE-logo hang investigation
+    // (SMPD completion path: LIBSD native calls, IOP->EE SIF DMA, SIF RPC, native stats).
+    // GOW_SND_DIAG is intentionally not set here: its read site is a namespace-scope
+    // initializer that runs at library load, before this function, so patch 0006
+    // defaults it at the read site instead.
+    SetEnvVar("PS2X_IOP_TRACE_DMA", std::string("1"));
+    SetEnvVar("PS2X_TRACE_RPC", std::string());
+    SetEnvVar("PS2X_IOP_NATIVE_STATS", std::string("1"));
+    // Diagnostic build 2 (kit patch 0007): trace the disc reads that feed the sound
+    // bank loader and sample every 10th IOP import call (sysclib excluded) so the
+    // loader thread's waits are visible in gow2.log.
+    SetEnvVar("GOW_CD_TRACE", std::string("1"));
+    SetEnvVar("PS2X_IOP_TRACE_EVERY", std::string("10"));
+    SetEnvVar("PS2X_IOP_TRACE_NOCLIB", std::string("1"));
 }
 
 void GameThreadMain()

@@ -1,0 +1,39 @@
+diff --git a/ps2xIOP/src/native/iop_native_overrides.cpp b/ps2xIOP/src/native/iop_native_overrides.cpp
+--- a/ps2xIOP/src/native/iop_native_overrides.cpp
++++ b/ps2xIOP/src/native/iop_native_overrides.cpp
+@@ -200,5 +200,7 @@ namespace ps2x::iop::detail
+         void sdVoiceTrans(IopNativeCall &c)
+         {
+             const uint32_t channel = arg(c, 0) & 1u, mode = arg(c, 1), iopAddr = arg(c, 2), spuAddr = arg(c, 3), size = arg(c, 4);
+             SoundEngine &sound = c.services.sound();
++            if (g_sndDiag)
++                std::fprintf(stderr, "[snd-diag] VoiceTrans ch=%u mode=%x iop=%x spu=%x size=%x handler=%x\n", channel, mode, iopAddr, spuAddr, size, g_libsd.handler[channel]);
+             std::vector<uint8_t> data(size);
+@@ -307,6 +309,8 @@ namespace ps2x::iop::detail
+         void sdSetTransIntrHandler(IopNativeCall &c)
+         {
+             const uint32_t channel = arg(c, 0) & 1u;
++            if (g_sndDiag)
++                std::fprintf(stderr, "[snd-diag] SetTransIntrHandler ch=%u handler=%x arg=%x\n", channel, arg(c, 1), arg(c, 2));
+             g_libsd.handler[channel] = arg(c, 1);
+             g_libsd.handlerArg[channel] = arg(c, 2);
+             g_libsd.handlerGp[channel] = c.cpu.gpr[kGp];
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -705,6 +705,15 @@ namespace ps2x::iop::detail
+             if (callbacks.empty())
+                 return;
+ 
++            // GOW-Android diagnostic (kit patch 0007): trace scheduled guest callback
++            // delivery (LIBSD transfer completion, cdvd/SIF DMA completion callbacks)
++            // with the same default-on GOW_SND_DIAG gate as the LIBSD call logging in
++            // iop_native_overrides.cpp (patch 0006); GOW_SND_DIAG=0 turns it off.
++            static const bool traceCallbacks = [] { const char *v = std::getenv("GOW_SND_DIAG"); return v == nullptr || v[0] != '0'; }();
++            if (traceCallbacks)
++                for (const ScheduledGuestCallback &callback : callbacks)
++                    std::fprintf(stderr, "[cb-diag] guest callback fn=%x a0=%x a1=%x\n", callback.function, callback.argument, callback.argument2);
++
+             servicingGuestCallbacks = true;
+             try
+             {
