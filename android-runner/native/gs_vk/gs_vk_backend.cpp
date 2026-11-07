@@ -432,6 +432,14 @@ struct GSVkBackend::Impl
 
     bool ensure();
     void fail(const char *what);
+    // GPU stall handling: a wedged queue or a lost device must never freeze the
+    // whole emulated machine (the EE blocks on GS sync, which starves the IOP).
+    // On the first failed wait / device-lost result the backend disables itself
+    // through the existing `failed` flag, so every entry point becomes a no-op
+    // and the game logic keeps running; the log line names the exact site.
+    bool gpuStalled = false;
+    void stallGpu(const char *where, VkResult res);
+    bool waitFrameFence(const char *where, uint64_t timeoutNs = 1000000000ull);
     bool createDeviceObjects();
     void destroyDeviceObjects();
     uint32_t memoryType(VkMemoryRequirements req, VkMemoryPropertyFlags props) const;
@@ -675,6 +683,30 @@ void GSVkBackend::Impl::fail(const char *what)
     std::fprintf(stderr, "[gs-vk] unavailable: %s\n", what);
     ps2x::host::Log("E/host/gs-vk", "Vulkan unavailable: %s", what);
     failed = true;
+}
+
+void GSVkBackend::Impl::stallGpu(const char *where, VkResult res)
+{
+    if (!gpuStalled)
+    {
+        gpuStalled = true;
+        std::fprintf(stderr, "[gs-vk] GPU stall at %s: VkResult %d — disabling Vulkan backend; game logic continues\n", where, static_cast<int>(res));
+        ps2x::host::Log("E/host/gs-vk", "GPU stall at %s: VkResult %d — Vulkan backend disabled, game logic continues", where, static_cast<int>(res));
+    }
+    failed = true;
+}
+
+bool GSVkBackend::Impl::waitFrameFence(const char *where, uint64_t timeoutNs)
+{
+    if (frameFence == VK_NULL_HANDLE)
+        return true;
+    const VkResult res = gs_vk::vk.WaitForFences(device, 1, &frameFence, VK_TRUE, timeoutNs);
+    if (res != VK_SUCCESS)
+    {
+        stallGpu(where, res);
+        return false;
+    }
+    return true;
 }
 
 bool GSVkBackend::Impl::ensure()
@@ -1099,11 +1131,15 @@ bool GSVkBackend::Impl::createDeviceObjects()
             VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
             su.commandBufferCount = 1;
             su.pCommandBuffers = &cb;
-            gs_vk::vk.QueueSubmit(queue, 1, &su, VK_NULL_HANDLE);
-            gs_vk::vk.QueueWaitIdle(queue);
+            // Bounded wait (was an unbounded QueueWaitIdle): submit on the
+            // shared frame fence and wait with a timeout; a stall disables
+            // the backend instead of blocking the caller forever.
+            gs_vk::vk.ResetFences(device, 1, &frameFence);
+            gs_vk::vk.QueueSubmit(queue, 1, &su, frameFence);
+            const bool uploadOk = waitFrameFence("texture-upload", 2000000000ull);
             gs_vk::vk.FreeCommandBuffers(device, cmdPool, 1, &cb);
             tmp.destroy(device);
-            return true;
+            return uploadOk;
         };
         if (!make(whiteTex, 1, 1, white) || !make(blackTex, 1, 1, black))
             return fail("dummy textures"), false;
@@ -1273,7 +1309,13 @@ void GSVkBackend::Impl::submitAndWait()
         su.pCommandBuffers = &frameCb;
         gs_vk::vk.ResetFences(device, 1, &frameFence);
         gs_vk::vk.QueueSubmit(queue, 1, &su, frameFence);
-        gs_vk::vk.WaitForFences(device, 1, &frameFence, VK_TRUE, 1000000000ull);
+        if (!waitFrameFence("submitAndWait"))
+        {
+            // The submission never completed: do not reset a command buffer
+            // that may still be executing. The backend is disabled now.
+            cbOpen = false;
+            return;
+        }
         gs_vk::vk.ResetCommandBuffer(frameCb, 0);
         gs_vk::vk.ResetCommandPool(device, cmdPool, 0);
         cbState = CbState::Initial;
@@ -1281,8 +1323,9 @@ void GSVkBackend::Impl::submitAndWait()
     }
     else
     {
-        if (gs_vk::vk.QueueWaitIdle)
-            gs_vk::vk.QueueWaitIdle(queue);
+        // Bounded idle wait (was an unbounded QueueWaitIdle): if the queue is
+        // wedged the backend disables itself instead of blocking forever.
+        waitFrameFence("submitAndWait-idle");
     }
     if (descPool && gs_vk::vk.ResetDescriptorPool)
         gs_vk::vk.ResetDescriptorPool(device, descPool, 0);
@@ -1836,7 +1879,11 @@ endFrameCb();
     su.pCommandBuffers = &frameCb;
     gs_vk::vk.ResetFences(device, 1, &frameFence);
     gs_vk::vk.QueueSubmit(queue, 1, &su, frameFence);
-    gs_vk::vk.WaitForFences(device, 1, &frameFence, VK_TRUE, 1000000000ull);
+    if (!waitFrameFence("readTargetCpu"))
+    {
+        cbOpen = false;
+        return false;
+    }
     gs_vk::vk.ResetCommandBuffer(frameCb, 0);
     gs_vk::vk.ResetCommandPool(device, cmdPool, 0);
     cbOpen = false;
@@ -3195,7 +3242,9 @@ void GSVkBackend::Impl::ensureSwapchain()
 
     if (device != VK_NULL_HANDLE)
     {
-        gs_vk::vk.DeviceWaitIdle(device);
+        // Bounded idle wait (was an unbounded DeviceWaitIdle): a wedged queue
+        // disables the backend via stallGpu instead of deadlocking this thread.
+        waitFrameFence("ensureSwapchain-idle", 2000000000ull);
     }
 
     ps2x::host::Log("host/gs-vk", "Creating swapchain for window %p (surface: %dx%d, current: %ux%u, needsRecreate=%d)",
@@ -3274,7 +3323,7 @@ void GSVkBackend::Impl::ensureSwapchain()
     VkResult scRes = gs_vk::vk.CreateSwapchainKHR(device, &ci, nullptr, &swap.swapchain);
     if (scRes != VK_SUCCESS && oldSwap != VK_NULL_HANDLE)
     {
-        gs_vk::vk.DeviceWaitIdle(device);
+        waitFrameFence("ensureSwapchain-retry-idle", 2000000000ull);
         gs_vk::vk.DestroySwapchainKHR(device, oldSwap, nullptr);
         ci.oldSwapchain = VK_NULL_HANDLE;
         scRes = gs_vk::vk.CreateSwapchainKHR(device, &ci, nullptr, &swap.swapchain);
@@ -3311,7 +3360,8 @@ void GSVkBackend::Impl::destroySwapchain()
 {
     if (device != VK_NULL_HANDLE)
     {
-        gs_vk::vk.DeviceWaitIdle(device);
+        // Bounded idle wait (was an unbounded DeviceWaitIdle), see ensureSwapchain.
+        waitFrameFence("destroySwapchain-idle", 2000000000ull);
     }
     if (swap.swapchain)
     {
@@ -3428,8 +3478,18 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
                 VkResult presRes = gs_vk::vk.QueuePresentKHR(d.queue, &pi);
                 if (presRes == VK_ERROR_OUT_OF_DATE_KHR)
                     d.swap.needsRecreate = true;
+                else if (presRes == VK_ERROR_DEVICE_LOST)
+                {
+                    d.stallGpu("present-blank", presRes);
+                    d.cbOpen = false;
+                    return frame;
+                }
 
-                gs_vk::vk.WaitForFences(d.device, 1, &d.frameFence, VK_TRUE, 1000000000ull);
+                if (!d.waitFrameFence("present-blank"))
+                {
+                    d.cbOpen = false;
+                    return frame;
+                }
                 gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
                 gs_vk::vk.ResetCommandPool(d.device, d.cmdPool, 0);
                 d.cbOpen = false;
@@ -3558,7 +3618,11 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
     su.pCommandBuffers = &d.frameCb;
     gs_vk::vk.ResetFences(d.device, 1, &d.frameFence);
     gs_vk::vk.QueueSubmit(d.queue, 1, &su, d.frameFence);
-    gs_vk::vk.WaitForFences(d.device, 1, &d.frameFence, VK_TRUE, 1000000000ull);
+    if (!d.waitFrameFence("present-readback"))
+    {
+        d.cbOpen = false;
+        return frame;
+    }
     gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
     gs_vk::vk.ResetCommandPool(d.device, d.cmdPool, 0);
     d.cbOpen = false;
@@ -3644,12 +3708,22 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
             {
                 d.swap.needsRecreate = true;
             }
+            else if (presRes == VK_ERROR_DEVICE_LOST)
+            {
+                d.stallGpu("present", presRes);
+                d.cbOpen = false;
+                return frame;
+            }
             else if (presRes != VK_SUCCESS && presRes != VK_SUBOPTIMAL_KHR)
             {
                 ps2x::host::Log("W/host/gs-vk", "QueuePresentKHR failed: %d", presRes);
             }
 
-            gs_vk::vk.WaitForFences(d.device, 1, &d.frameFence, VK_TRUE, 1000000000ull);
+            if (!d.waitFrameFence("present"))
+            {
+                d.cbOpen = false;
+                return frame;
+            }
             gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
             gs_vk::vk.ResetCommandPool(d.device, d.cmdPool, 0);
             d.cbOpen = false;
@@ -3667,6 +3741,12 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         {
             if (acq == VK_ERROR_OUT_OF_DATE_KHR)
                 d.swap.needsRecreate = true;
+            else if (acq == VK_ERROR_DEVICE_LOST)
+            {
+                d.stallGpu("acquire", acq);
+                d.cbOpen = false;
+                return frame;
+            }
             else
                 ps2x::host::Log("W/host/gs-vk", "AcquireNextImageKHR failed: %d", acq);
             d.cbOpen = false;
