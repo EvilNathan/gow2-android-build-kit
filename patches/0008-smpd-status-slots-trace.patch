@@ -1,0 +1,29 @@
+diff --git a/ps2xIOP/src/emulator/services/iop_rpc.cpp b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+--- a/ps2xIOP/src/emulator/services/iop_rpc.cpp
++++ b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+@@ -120,6 +120,24 @@ namespace ps2x::iop::detail
+                     out << "[IOP:sifdma] src=0x" << std::hex << transfer.source << " dst=0x" << transfer.destination
+                         << " size=0x" << transfer.size << " read=" << readOk << " write=" << writeOk << " bytes=";
+                     for (uint32_t b = 0u; b < std::min<uint32_t>(16u, transfer.size); ++b)
+                         out << ' ' << static_cast<uint32_t>(scratch[b]);
++                    // GOW-Android diagnostic (kit patch 0008): for the SMPD status block
++                    // (EE 0x338540), also dump the per-slot status words (slot base 0xF4,
++                    // stride 0x24, status at +0x20 -> first slot word at offset 0x114).
++                    // The EE loader waits for bit 0x2000 in one of these words; the
++                    // 16-byte prefix above can never show it.
++                    if (transfer.destination == 0x338540u && transfer.size >= 0x198u)
++                    {
++                        out << " slots=";
++                        for (uint32_t s = 0u; s < 4u; ++s)
++                        {
++                            const uint32_t off = 0x114u + s * 0x24u;
++                            const uint32_t word = static_cast<uint32_t>(scratch[off]) |
++                                                  (static_cast<uint32_t>(scratch[off + 1u]) << 8) |
++                                                  (static_cast<uint32_t>(scratch[off + 2u]) << 16) |
++                                                  (static_cast<uint32_t>(scratch[off + 3u]) << 24);
++                            out << ' ' << word;
++                        }
++                    }
+                     m_host.log(LogLevel::Info, out.str());
+                 }
+                 if (!writeOk)

@@ -351,12 +351,10 @@ void ApplySettingsJson(const char* json)
     SetEnvVar("PS2X_IOP_TRACE_DMA", std::string("1"));
     SetEnvVar("PS2X_TRACE_RPC", std::string());
     SetEnvVar("PS2X_IOP_NATIVE_STATS", std::string("1"));
-    // Diagnostic build 2 (kit patch 0007): trace the disc reads that feed the sound
-    // bank loader and sample every 10th IOP import call (sysclib excluded) so the
-    // loader thread's waits are visible in gow2.log.
+    // Diagnostic build 2/3 (kit patches 0007/0008): trace the disc reads that feed
+    // the sound bank loader. The sampled IOP import trace from diag2 is dropped
+    // again: its volume perturbs IOP/EE timing.
     SetEnvVar("GOW_CD_TRACE", std::string("1"));
-    SetEnvVar("PS2X_IOP_TRACE_EVERY", std::string("10"));
-    SetEnvVar("PS2X_IOP_TRACE_NOCLIB", std::string("1"));
 }
 
 void GameThreadMain()
