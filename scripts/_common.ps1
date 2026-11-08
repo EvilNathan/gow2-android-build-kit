@@ -150,6 +150,23 @@ function Apply-EnginePatches {
             & git -C $RecompDir checkout -- . 2>$null | Out-Null
         }
         & git -C $RecompDir checkout-index -f -a 2>$null | Out-Null
+
+        # Untracked new files introduced by patches must be removed so that
+        # re-applying the patch stack from the pinned commit does not fail.
+        foreach ($patch in $patches) {
+            $lines = Get-Content $patch.FullName
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match '^diff --git a/.*? b/(.+)$') {
+                    $rel = $Matches[1]
+                    if ($i + 1 -lt $lines.Count -and $lines[$i + 1] -match '^new file mode') {
+                        $target = Join-Path $RecompDir $rel
+                        if (Test-Path $target) {
+                            Remove-Item -Force $target 2>$null
+                        }
+                    }
+                }
+            }
+        }
     }
     finally { $ErrorActionPreference = $previous }
 

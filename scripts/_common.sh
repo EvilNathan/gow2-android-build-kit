@@ -200,6 +200,20 @@ apply_engine_patches() {
     fi
     git -C "$RECOMP_DIR" checkout-index -f -a 2>/dev/null || true
 
+    # Untracked new files introduced by patches must be removed so that
+    # re-applying the patch stack from the pinned commit does not fail.
+    for patch in "${patches[@]}"; do
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^diff\ --git\ a/.*\ b/(.+)$ ]]; then
+                local rel="${BASH_REMATCH[1]}"
+                read -r next_line || true
+                if [[ "$next_line" =~ ^new\ file\ mode ]]; then
+                    rm -f "$RECOMP_DIR/$rel"
+                fi
+            fi
+        done < "$patch"
+    done
+
     write_step 'Kit patches'
     local rc
     for patch in "${patches[@]}"; do
