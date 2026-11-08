@@ -21,10 +21,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -262,8 +264,10 @@ struct GSVkBackend::Impl
 
     // descriptor layout: 0 uTex, 1 uDest(input), 2 uTables, 3 uRtColor, 4 uPalette, 5 uIdxPalette, 6 UBO
     VkDescriptorSetLayout drawSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout presentSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool descPool = VK_NULL_HANDLE;
     VkPipelineLayout drawPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout presentPipelineLayout = VK_NULL_HANDLE;
 
     VkRenderPass rpDraw = VK_NULL_HANDLE;      // color LOAD + depth LOAD (+ input attachment)
     VkRenderPass rpDrawNoInput = VK_NULL_HANDLE; // same, but no input attachment (draws that never read uDest)
@@ -439,7 +443,7 @@ struct GSVkBackend::Impl
     // and the game logic keeps running; the log line names the exact site.
     bool gpuStalled = false;
     void stallGpu(const char *where, VkResult res);
-    bool waitFrameFence(const char *where, uint64_t timeoutNs = 1000000000ull);
+    bool waitFrameFence(const char *where, uint64_t timeoutNs = 5000000000ull);
     // Submission tracing: a compact description of every draw/shuffle recorded
     // since the previous queue submission, printed with the submission serial
     // in submitAndWait. If a submission wedges, the last printed composition
@@ -524,6 +528,7 @@ struct GSVkBackend::Impl
     void trashTexture(Texture &tex);
     void trashBuffer(VkBuffer buf, VkDeviceMemory mem = VK_NULL_HANDLE);
     void emptyTrash();
+    ~Impl() { destroyDeviceObjects(); }
 };
 
 // ==== lifecycle ====================================================================================
@@ -700,20 +705,34 @@ void GSVkBackend::Impl::stallGpu(const char *where, VkResult res)
     if (!gpuStalled)
     {
         gpuStalled = true;
-        std::fprintf(stderr, "[gs-vk] GPU stall at %s: VkResult %d — disabling Vulkan backend; game logic continues\n", where, static_cast<int>(res));
-        ps2x::host::Log("E/host/gs-vk", "GPU stall at %s: VkResult %d — Vulkan backend disabled, game logic continues", where, static_cast<int>(res));
+        std::fprintf(stderr, "[gs-vk] GPU error at %s: VkResult %d — disabling Vulkan backend; game logic continues\n", where, static_cast<int>(res));
+        ps2x::host::Log("E/host/gs-vk", "GPU error at %s: VkResult %d — Vulkan backend disabled, game logic continues", where, static_cast<int>(res));
     }
-    failed = true;
+    if (res == VK_ERROR_DEVICE_LOST)
+        failed = true;
 }
 
 bool GSVkBackend::Impl::waitFrameFence(const char *where, uint64_t timeoutNs)
 {
-    if (frameFence == VK_NULL_HANDLE)
+    if (frameFence == VK_NULL_HANDLE || device == VK_NULL_HANDLE)
         return true;
-    const VkResult res = gs_vk::vk.WaitForFences(device, 1, &frameFence, VK_TRUE, timeoutNs);
+    VkResult res = gs_vk::vk.WaitForFences(device, 1, &frameFence, VK_TRUE, timeoutNs);
+    if (res == VK_TIMEOUT)
+    {
+        ps2x::host::Log("W/host/gs-vk", "Fence wait timeout (%llu ns) at %s; retrying with extended timeout...",
+                        static_cast<unsigned long long>(timeoutNs), where);
+        res = gs_vk::vk.WaitForFences(device, 1, &frameFence, VK_TRUE, 5000000000ull);
+    }
     if (res != VK_SUCCESS)
     {
-        stallGpu(where, res);
+        if (res == VK_ERROR_DEVICE_LOST)
+        {
+            stallGpu(where, res);
+        }
+        else
+        {
+            ps2x::host::Log("E/host/gs-vk", "Fence wait failed at %s with VkResult %d (non-fatal, continuing)", where, static_cast<int>(res));
+        }
         return false;
     }
     return true;
@@ -925,6 +944,22 @@ bool GSVkBackend::Impl::createDeviceObjects()
     if (gs_vk::vk.CreatePipelineLayout(device, &pli, nullptr, &drawPipelineLayout) != VK_SUCCESS)
         return fail("pipeline layout"), false;
 
+    // present descriptor layout (binding 0: uSrc sampler2D, binding 1: PresentUbo)
+    VkDescriptorSetLayoutBinding pb[2]{};
+    pb[0] = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    pb[1] = {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo pli_desc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    pli_desc.bindingCount = 2;
+    pli_desc.pBindings = pb;
+    if (gs_vk::vk.CreateDescriptorSetLayout(device, &pli_desc, nullptr, &presentSetLayout) != VK_SUCCESS)
+        return fail("present descriptor layout"), false;
+
+    VkPipelineLayoutCreateInfo pli_pres{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli_pres.setLayoutCount = 1;
+    pli_pres.pSetLayouts = &presentSetLayout;
+    if (gs_vk::vk.CreatePipelineLayout(device, &pli_pres, nullptr, &presentPipelineLayout) != VK_SUCCESS)
+        return fail("present pipeline layout"), false;
+
     // descriptor pool
     VkDescriptorPoolSize sizes[] = {
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192 * 5},
@@ -1112,7 +1147,7 @@ bool GSVkBackend::Impl::createDeviceObjects()
             imi.mipLevels = imi.arrayLayers = 1;
             imi.samples = VK_SAMPLE_COUNT_1_BIT;
             imi.tiling = VK_IMAGE_TILING_OPTIMAL;
-            imi.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            imi.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
             imi.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             if (gs_vk::vk.CreateImage(device, &imi, nullptr, &img.image) != VK_SUCCESS)
                 return false;
@@ -1160,9 +1195,9 @@ bool GSVkBackend::Impl::createDeviceObjects()
             gs_vk::vk.CmdCopyBufferToImage(cb, tmp.buffer, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
             VkImageMemoryBarrier barPost = bar;
             barPost.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barPost.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barPost.newLayout = VK_IMAGE_LAYOUT_GENERAL;
             barPost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            barPost.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barPost.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
             gs_vk::vk.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barPost);
             gs_vk::vk.EndCommandBuffer(cb);
             VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -1282,6 +1317,62 @@ vi.image = tableImage;
         gs_vk::vk.MapMemory(device, readbackMem, 0, req.size, 0, reinterpret_cast<void **>(&readbackMapped));
     }
     return true;
+}
+
+void GSVkBackend::Impl::destroyDeviceObjects()
+{
+    if (device == VK_NULL_HANDLE)
+        return;
+    waitFrameFence("destroyDeviceObjects", 2000000000ull);
+    destroySwapchain();
+    emptyTrash();
+    for (auto &p : pipelines)
+    {
+        if (p.second != VK_NULL_HANDLE)
+            gs_vk::vk.DestroyPipeline(device, p.second, nullptr);
+    }
+    pipelines.clear();
+    if (drawPipelineLayout != VK_NULL_HANDLE)
+    {
+        gs_vk::vk.DestroyPipelineLayout(device, drawPipelineLayout, nullptr);
+        drawPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (presentPipelineLayout != VK_NULL_HANDLE)
+    {
+        gs_vk::vk.DestroyPipelineLayout(device, presentPipelineLayout, nullptr);
+        presentPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (drawSetLayout != VK_NULL_HANDLE)
+    {
+        gs_vk::vk.DestroyDescriptorSetLayout(device, drawSetLayout, nullptr);
+        drawSetLayout = VK_NULL_HANDLE;
+    }
+    if (presentSetLayout != VK_NULL_HANDLE)
+    {
+        gs_vk::vk.DestroyDescriptorSetLayout(device, presentSetLayout, nullptr);
+        presentSetLayout = VK_NULL_HANDLE;
+    }
+    if (descPool != VK_NULL_HANDLE)
+    {
+        gs_vk::vk.DestroyDescriptorPool(device, descPool, nullptr);
+        descPool = VK_NULL_HANDLE;
+    }
+    if (rpDraw != VK_NULL_HANDLE) { gs_vk::vk.DestroyRenderPass(device, rpDraw, nullptr); rpDraw = VK_NULL_HANDLE; }
+    if (rpDrawNoInput != VK_NULL_HANDLE) { gs_vk::vk.DestroyRenderPass(device, rpDrawNoInput, nullptr); rpDrawNoInput = VK_NULL_HANDLE; }
+    if (rpClearColor != VK_NULL_HANDLE) { gs_vk::vk.DestroyRenderPass(device, rpClearColor, nullptr); rpClearColor = VK_NULL_HANDLE; }
+    if (rpClearColorOnly != VK_NULL_HANDLE) { gs_vk::vk.DestroyRenderPass(device, rpClearColorOnly, nullptr); rpClearColorOnly = VK_NULL_HANDLE; }
+    if (rpInitCD != VK_NULL_HANDLE) { gs_vk::vk.DestroyRenderPass(device, rpInitCD, nullptr); rpInitCD = VK_NULL_HANDLE; }
+    if (rpPresent != VK_NULL_HANDLE) { gs_vk::vk.DestroyRenderPass(device, rpPresent, nullptr); rpPresent = VK_NULL_HANDLE; }
+    if (vsDraw != VK_NULL_HANDLE) { gs_vk::vk.DestroyShaderModule(device, vsDraw, nullptr); vsDraw = VK_NULL_HANDLE; }
+    if (fsDraw != VK_NULL_HANDLE) { gs_vk::vk.DestroyShaderModule(device, fsDraw, nullptr); fsDraw = VK_NULL_HANDLE; }
+    if (vsShuffle != VK_NULL_HANDLE) { gs_vk::vk.DestroyShaderModule(device, vsShuffle, nullptr); vsShuffle = VK_NULL_HANDLE; }
+    if (fsShuffle != VK_NULL_HANDLE) { gs_vk::vk.DestroyShaderModule(device, fsShuffle, nullptr); fsShuffle = VK_NULL_HANDLE; }
+    if (vsPresent != VK_NULL_HANDLE) { gs_vk::vk.DestroyShaderModule(device, vsPresent, nullptr); vsPresent = VK_NULL_HANDLE; }
+    if (fsPresent != VK_NULL_HANDLE) { gs_vk::vk.DestroyShaderModule(device, fsPresent, nullptr); fsPresent = VK_NULL_HANDLE; }
+    if (nearestSampler != VK_NULL_HANDLE) { gs_vk::vk.DestroySampler(device, nearestSampler, nullptr); nearestSampler = VK_NULL_HANDLE; }
+    if (linearSampler != VK_NULL_HANDLE) { gs_vk::vk.DestroySampler(device, linearSampler, nullptr); linearSampler = VK_NULL_HANDLE; }
+    rings.destroy(device);
+    staging.destroy(device);
 }
 
 uint32_t GSVkBackend::Impl::memoryType(VkMemoryRequirements req, VkMemoryPropertyFlags props) const
@@ -1518,7 +1609,7 @@ VkPipeline GSVkBackend::Impl::buildPipeline(const PipelineKey &key)
     gi.pDepthStencilState = &ds;
     gi.pColorBlendState = &cb;
     gi.pDynamicState = &dyn;
-    gi.layout = drawPipelineLayout;
+    gi.layout = (key.program == Program::Present) ? presentPipelineLayout : drawPipelineLayout;
     gi.renderPass = key.program == Program::Present ? rpPresent : rpDraw;
     gi.subpass = 0;
     VkPipeline p = VK_NULL_HANDLE;
@@ -3211,7 +3302,7 @@ void GSVkBackend::Impl::drawCircuit(VkImageView src, uint32_t cdbx, uint32_t cdb
     VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     dai.descriptorPool = descPool;
     dai.descriptorSetCount = 1;
-    dai.pSetLayouts = &drawSetLayout;
+    dai.pSetLayouts = &presentSetLayout;
     VkDescriptorSet dsc = VK_NULL_HANDLE;
     auto ubo = rings.alloc(sizeof(PresentUbo), 256);
     if (!ubo.cpu || gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc) != VK_SUCCESS)
@@ -3230,22 +3321,12 @@ void GSVkBackend::Impl::drawCircuit(VkImageView src, uint32_t cdbx, uint32_t cdb
     u.uSrcEdge[0] = static_cast<int32_t>(srcEdge);
     std::memcpy(ubo.cpu, &u, sizeof(u));
     VkDescriptorImageInfo texInfo{nearestSampler, src, VK_IMAGE_LAYOUT_GENERAL};
-    VkDescriptorImageInfo destInfo{VK_NULL_HANDLE, blackTex.view, VK_IMAGE_LAYOUT_GENERAL};
-    VkDescriptorImageInfo tablesInfo{nearestSampler, tableView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkDescriptorImageInfo rtColorInfo{nearestSampler, blackTex.view, VK_IMAGE_LAYOUT_GENERAL};
-    VkDescriptorImageInfo palInfo{nearestSampler, blackTex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkDescriptorImageInfo idxPalInfo{nearestSampler, blackTex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorBufferInfo bufInfo{rings.buffer, ubo.offset, sizeof(PresentUbo)};
-    VkWriteDescriptorSet writes[7] = {
+    VkWriteDescriptorSet writes[2] = {
         {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &texInfo, nullptr, nullptr},
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc, 1, 0, 1, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, &destInfo, nullptr, nullptr},
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc, 2, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &tablesInfo, nullptr, nullptr},
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc, 3, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &rtColorInfo, nullptr, nullptr},
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc, 4, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &palInfo, nullptr, nullptr},
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc, 5, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &idxPalInfo, nullptr, nullptr},
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc, 6, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &bufInfo, nullptr},
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, dsc, 1, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &bufInfo, nullptr},
     };
-    gs_vk::vk.UpdateDescriptorSets(device, 7, writes, 0, nullptr);
+    gs_vk::vk.UpdateDescriptorSets(device, 2, writes, 0, nullptr);
 
     PipelineKey key{};
     key.program = Program::Present;
@@ -3276,7 +3357,7 @@ void GSVkBackend::Impl::drawCircuit(VkImageView src, uint32_t cdbx, uint32_t cdb
         gs_vk::vk.CmdSetBlendConstants(frameCb, cc);
     }
     gs_vk::vk.CmdBindPipeline(frameCb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline(key));
-    gs_vk::vk.CmdBindDescriptorSets(frameCb, VK_PIPELINE_BIND_POINT_GRAPHICS, drawPipelineLayout, 0, 1, &dsc, 0, nullptr);
+    gs_vk::vk.CmdBindDescriptorSets(frameCb, VK_PIPELINE_BIND_POINT_GRAPHICS, presentPipelineLayout, 0, 1, &dsc, 0, nullptr);
     gs_vk::vk.CmdDraw(frameCb, 3, 1, 0, 0);
 }
 
@@ -3572,11 +3653,36 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
     if (!d.presentFb)
         return frame;
 
+    d.ensureSwapchain();
+    uint32_t swapIdx = 0;
+    bool hasSwapImage = false;
+    if (d.swap.ok)
+    {
+        VkResult acq = gs_vk::vk.AcquireNextImageKHR(d.device, d.swap.swapchain, 1000000000ull, d.swap.acquired, VK_NULL_HANDLE, &swapIdx);
+        if (acq == VK_SUCCESS || acq == VK_SUBOPTIMAL_KHR)
+        {
+            hasSwapImage = true;
+        }
+        else if (acq == VK_ERROR_OUT_OF_DATE_KHR)
+        {
+            d.swap.needsRecreate = true;
+        }
+        else if (acq == VK_ERROR_DEVICE_LOST)
+        {
+            d.stallGpu("acquire", acq);
+            return frame;
+        }
+        else
+        {
+            ps2x::host::Log("W/host/gs-vk", "AcquireNextImageKHR failed: %d", acq);
+        }
+    }
+
     d.beginFrameCb();
     // Mobile TBDR barrier: Ensure color attachment writes to render targets are visible before present sampling
     for (const auto &t : d.targets)
     {
-        if (t && t->color != VK_NULL_HANDLE && t->usedW != 0u)
+        if (t && t->color != VK_NULL_HANDLE && (t->usedW != 0u || t->lastDrawSeq != 0u))
         {
             VkImageMemoryBarrier imb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
             imb.image = t->color;
@@ -3664,156 +3770,141 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         gs_vk::vk.CmdEndRenderPass(d.frameCb);
         (void)slbg;
     }
-    // readback for the latched frame
+    if (hasSwapImage)
     {
+        VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        bar.image = d.swap.images[swapIdx];
+        bar.srcQueueFamilyIndex = bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
+        if (d.swap.canBlit)
+        {
+            VkImageMemoryBarrier pbar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            pbar.image = d.presentImage;
+            pbar.srcQueueFamilyIndex = pbar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            pbar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            pbar.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+            pbar.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            pbar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            pbar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &pbar);
+
+            VkImageBlit blit{};
+            blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blit.srcOffsets[1] = {static_cast<int32_t>(outW), static_cast<int32_t>(outH), 1};
+            blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blit.dstOffsets[1] = {static_cast<int32_t>(d.swap.width), static_cast<int32_t>(d.swap.height), 1};
+            gs_vk::vk.CmdBlitImage(d.frameCb, d.presentImage, VK_IMAGE_LAYOUT_GENERAL, d.swap.images[swapIdx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+        }
+        VkImageMemoryBarrier bar2 = bar;
+        bar2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar2.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        bar2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bar2.dstAccessMask = 0;
+        gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar2);
+        d.endFrameCb();
+
+        VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+        VkSubmitInfo psu{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        psu.waitSemaphoreCount = 1;
+        psu.pWaitSemaphores = &d.swap.acquired;
+        psu.pWaitDstStageMask = &waitStage;
+        psu.commandBufferCount = 1;
+        psu.pCommandBuffers = &d.frameCb;
+        psu.signalSemaphoreCount = 1;
+        psu.pSignalSemaphores = &d.swap.rendered;
+        d.logSubmitSummary("present-window", static_cast<uint64_t>(d.presentCount));
+        gs_vk::vk.ResetFences(d.device, 1, &d.frameFence);
+        gs_vk::vk.QueueSubmit(d.queue, 1, &psu, d.frameFence);
+        VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        pi.waitSemaphoreCount = 1;
+        pi.pWaitSemaphores = &d.swap.rendered;
+        pi.swapchainCount = 1;
+        pi.pSwapchains = &d.swap.swapchain;
+        pi.pImageIndices = &swapIdx;
+        VkResult presRes = gs_vk::vk.QueuePresentKHR(d.queue, &pi);
+        if (presRes == VK_ERROR_OUT_OF_DATE_KHR)
+        {
+            d.swap.needsRecreate = true;
+        }
+        else if (presRes == VK_ERROR_DEVICE_LOST)
+        {
+            d.stallGpu("present", presRes);
+            d.cbOpen = false;
+            return frame;
+        }
+        else if (presRes != VK_SUCCESS && presRes != VK_SUBOPTIMAL_KHR)
+        {
+            ps2x::host::Log("W/host/gs-vk", "QueuePresentKHR failed: %d", presRes);
+        }
+
+        if (!d.waitFrameFence("present"))
+        {
+            d.cbOpen = false;
+            return frame;
+        }
+        gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
+        gs_vk::vk.ResetCommandPool(d.device, d.cmdPool, 0);
+        d.cbOpen = false;
+        d.cbState = Impl::CbState::Initial;
+        d.emptyTrash();
+
+        if (d.presentCount <= 10 || (d.presentCount % 60) == 0)
+        {
+            ps2x::host::Log("host/gs-vk", "Frame %d presented OK (%ux%u -> %ux%u) pmode=0x%llx fbp1=%u fbp2=%u ok1=%d ok2=%d",
+                            d.presentCount, outW, outH, d.swap.width, d.swap.height,
+                            (unsigned long long)request.pmode, fbp1, fbp2, ok1 ? 1 : 0, ok2 ? 1 : 0);
+        }
+    }
+    else
+    {
+        // Offscreen readback path (probe testing or fallback when swapchain is not available)
+        VkImageMemoryBarrier pbar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        pbar.image = d.presentImage;
+        pbar.srcQueueFamilyIndex = pbar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        pbar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        pbar.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        pbar.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        pbar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        pbar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &pbar);
+
         VkBufferImageCopy cp{};
         cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         cp.imageExtent = {outW, outH, 1};
         gs_vk::vk.CmdCopyImageToBuffer(d.frameCb, d.presentImage, VK_IMAGE_LAYOUT_GENERAL, d.readbackBuffer, 1, &cp);
-    }
-    d.endFrameCb();
+        d.endFrameCb();
 
-    // submit and wait (one submission per present keeps everything simple)
-    VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    su.commandBufferCount = 1;
-    su.pCommandBuffers = &d.frameCb;
-    d.logSubmitSummary("present-readback", static_cast<uint64_t>(d.presentCount));
-    gs_vk::vk.ResetFences(d.device, 1, &d.frameFence);
-    gs_vk::vk.QueueSubmit(d.queue, 1, &su, d.frameFence);
-    if (!d.waitFrameFence("present-readback"))
-    {
-        d.cbOpen = false;
-        return frame;
-    }
-    gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
-    gs_vk::vk.ResetCommandPool(d.device, d.cmdPool, 0);
-    d.cbOpen = false;
-    d.cbState = Impl::CbState::Initial;
-    d.emptyTrash();
-
-    std::memcpy(frame.pixels.data(), d.readbackMapped, frame.pixels.size());
-    // the displayed image is opaque: force alpha to 1
-    for (size_t i = 3; i < frame.pixels.size(); i += 4)
-        frame.pixels[i] = 255u;
-    // the frontend packs presentation rows with a fixed 640 pixel stride
-    if (frame.width < 640u)
-    {
-        std::vector<uint8_t> rows(static_cast<size_t>(640u) * frame.height * 4u, 0u);
-        for (uint32_t y = 0; y < frame.height; ++y)
-            std::memcpy(rows.data() + static_cast<size_t>(y) * 640u * 4u, frame.pixels.data() + static_cast<size_t>(y) * frame.width * 4u,
-                        static_cast<size_t>(frame.width) * 4u);
-        frame.pixels = std::move(rows);
-    }
-
-    // present to the window (Android)
-    d.ensureSwapchain();
-    if (d.swap.ok)
-    {
-        uint32_t idx = 0;
-        VkResult acq = gs_vk::vk.AcquireNextImageKHR(d.device, d.swap.swapchain, 1000000000ull, d.swap.acquired, VK_NULL_HANDLE, &idx);
-        if (acq == VK_SUCCESS || acq == VK_SUBOPTIMAL_KHR)
+        VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        su.commandBufferCount = 1;
+        su.pCommandBuffers = &d.frameCb;
+        d.logSubmitSummary("present-readback", static_cast<uint64_t>(d.presentCount));
+        gs_vk::vk.ResetFences(d.device, 1, &d.frameFence);
+        gs_vk::vk.QueueSubmit(d.queue, 1, &su, d.frameFence);
+        if (!d.waitFrameFence("present-readback"))
         {
-            d.beginFrameCb();
-            VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-            bar.image = d.swap.images[idx];
-            bar.srcQueueFamilyIndex = bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
-            if (d.swap.canBlit)
-            {
-                VkImageMemoryBarrier pbar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-                pbar.image = d.presentImage;
-                pbar.srcQueueFamilyIndex = pbar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                pbar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                pbar.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-                pbar.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-                pbar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-                pbar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &pbar);
-
-                VkImageBlit blit{};
-                blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                blit.srcOffsets[1] = {static_cast<int32_t>(outW), static_cast<int32_t>(outH), 1};
-                blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                blit.dstOffsets[1] = {static_cast<int32_t>(d.swap.width), static_cast<int32_t>(d.swap.height), 1};
-                gs_vk::vk.CmdBlitImage(d.frameCb, d.presentImage, VK_IMAGE_LAYOUT_GENERAL, d.swap.images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-            }
-            VkImageMemoryBarrier bar2 = bar;
-            bar2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            bar2.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-            bar2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            bar2.dstAccessMask = 0;
-            gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar2);
-            d.endFrameCb();
-            VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
-            VkSubmitInfo psu{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            psu.waitSemaphoreCount = 1;
-            psu.pWaitSemaphores = &d.swap.acquired;
-            psu.pWaitDstStageMask = &waitStage;
-            psu.commandBufferCount = 1;
-            psu.pCommandBuffers = &d.frameCb;
-            psu.signalSemaphoreCount = 1;
-            psu.pSignalSemaphores = &d.swap.rendered;
-            d.logSubmitSummary("present-window", static_cast<uint64_t>(d.presentCount));
-            gs_vk::vk.ResetFences(d.device, 1, &d.frameFence);
-            gs_vk::vk.QueueSubmit(d.queue, 1, &psu, d.frameFence);
-            VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-            pi.waitSemaphoreCount = 1;
-            pi.pWaitSemaphores = &d.swap.rendered;
-            pi.swapchainCount = 1;
-            pi.pSwapchains = &d.swap.swapchain;
-            pi.pImageIndices = &idx;
-            VkResult presRes = gs_vk::vk.QueuePresentKHR(d.queue, &pi);
-            if (presRes == VK_ERROR_OUT_OF_DATE_KHR)
-            {
-                d.swap.needsRecreate = true;
-            }
-            else if (presRes == VK_ERROR_DEVICE_LOST)
-            {
-                d.stallGpu("present", presRes);
-                d.cbOpen = false;
-                return frame;
-            }
-            else if (presRes != VK_SUCCESS && presRes != VK_SUBOPTIMAL_KHR)
-            {
-                ps2x::host::Log("W/host/gs-vk", "QueuePresentKHR failed: %d", presRes);
-            }
-
-            if (!d.waitFrameFence("present"))
-            {
-                d.cbOpen = false;
-                return frame;
-            }
-            gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
-            gs_vk::vk.ResetCommandPool(d.device, d.cmdPool, 0);
             d.cbOpen = false;
-            d.cbState = Impl::CbState::Initial;
-            d.emptyTrash();
-
-            if (d.presentCount <= 10 || (d.presentCount % 60) == 0)
-            {
-                ps2x::host::Log("host/gs-vk", "Frame %d presented OK (%ux%u -> %ux%u) pmode=0x%llx fbp1=%u fbp2=%u ok1=%d ok2=%d",
-                                d.presentCount, outW, outH, d.swap.width, d.swap.height,
-                                (unsigned long long)request.pmode, fbp1, fbp2, ok1 ? 1 : 0, ok2 ? 1 : 0);
-            }
+            return frame;
         }
-        else
+        gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
+        gs_vk::vk.ResetCommandPool(d.device, d.cmdPool, 0);
+        d.cbOpen = false;
+        d.cbState = Impl::CbState::Initial;
+        d.emptyTrash();
+
+        std::memcpy(frame.pixels.data(), d.readbackMapped, frame.pixels.size());
+        for (size_t i = 3; i < frame.pixels.size(); i += 4)
+            frame.pixels[i] = 255u;
+        if (frame.width < 640u)
         {
-            if (acq == VK_ERROR_OUT_OF_DATE_KHR)
-                d.swap.needsRecreate = true;
-            else if (acq == VK_ERROR_DEVICE_LOST)
-            {
-                d.stallGpu("acquire", acq);
-                d.cbOpen = false;
-                return frame;
-            }
-            else
-                ps2x::host::Log("W/host/gs-vk", "AcquireNextImageKHR failed: %d", acq);
-            d.cbOpen = false;
-            d.cbState = Impl::CbState::Initial;
+            std::vector<uint8_t> rows(static_cast<size_t>(640u) * frame.height * 4u, 0u);
+            for (uint32_t y = 0; y < frame.height; ++y)
+                std::memcpy(rows.data() + static_cast<size_t>(y) * 640u * 4u, frame.pixels.data() + static_cast<size_t>(y) * frame.width * 4u,
+                            static_cast<size_t>(frame.width) * 4u);
+            frame.pixels = std::move(rows);
         }
     }
     return frame;

@@ -1,9 +1,10 @@
 #version 450
 // Display composition (gs_hw_backend.cpp kPresentVs): fullscreen triangle.
 
-layout(set = 0, binding = 6) uniform PresentUbo
+layout(set = 0, binding = 1) uniform PresentUbo
 {
-    vec4 uPad;
+    ivec4 uSrcOffset;
+    ivec4 uSrcEdge;
 };
 
 void main()

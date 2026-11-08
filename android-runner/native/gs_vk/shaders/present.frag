@@ -7,7 +7,7 @@ layout(location = 0) out vec4 oColor;
 
 layout(set = 0, binding = 0) uniform sampler2D uSrc;
 
-layout(set = 0, binding = 6) uniform PresentUbo
+layout(set = 0, binding = 1) uniform PresentUbo
 {
     ivec4 uSrcOffset; // x, y: source pixel of output pixel 0; z: 1 = CT24 (alpha 0x80); w: 1 = alpha x2 as blend factor
     ivec4 uSrcEdge;   // x: first source row/column shown; the ones before it repeat it

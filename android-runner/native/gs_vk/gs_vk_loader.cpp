@@ -9,6 +9,9 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#if defined(__ANDROID__)
+#include "ps2x_host.h"
+#endif
 #endif
 
 namespace gs_vk
@@ -36,7 +39,23 @@ namespace gs_vk
         if (s_library)
             return true;
 #if defined(__ANDROID__)
-        const char *candidates[] = {"libvulkan.so"};
+        static char customDriver[512];
+        const char *candidates[8] = {};
+        int numCandidates = 0;
+        if (const char *env = std::getenv("GOW_VK_DRIVER"); env && *env)
+        {
+            std::snprintf(customDriver, sizeof(customDriver), "%s", env);
+            candidates[numCandidates++] = customDriver;
+        }
+        else if (const char *env2 = std::getenv("PS2X_VK_DRIVER"); env2 && *env2)
+        {
+            std::snprintf(customDriver, sizeof(customDriver), "%s", env2);
+            candidates[numCandidates++] = customDriver;
+        }
+        candidates[numCandidates++] = "/sdcard/gow2/libvulkan_freedreno.so";
+        candidates[numCandidates++] = "/storage/emulated/0/Android/data/com.gow2.android/files/libvulkan_freedreno.so";
+        candidates[numCandidates++] = "/data/data/com.gow2.android/files/libvulkan_freedreno.so";
+        candidates[numCandidates++] = "libvulkan.so";
 #else
         // Desktop probe: SwiftShader's ICD DLL exports the loader entry points.
         // PS2X_VK_ICD overrides; then a few known locations.
@@ -75,6 +94,9 @@ namespace gs_vk
             }
             std::memset(&vk, 0, sizeof(vk));
             s_getInstanceProcAddr = getInstanceProcAddr;
+#if defined(__ANDROID__)
+            ps2x::host::Log("host/gs-vk", "Loaded Vulkan driver library: %s", path);
+#endif
 #define GSVK_LOAD(name) vk.name = reinterpret_cast<PFN_vk##name>(getInstanceProcAddr(VK_NULL_HANDLE, "vk" #name))
             GSVK_LOAD(CreateInstance);
             GSVK_LOAD(EnumerateInstanceLayerProperties);
