@@ -20,6 +20,7 @@ project or a GitHub account.
 | Codex | OpenAI | Code review and build fixes |
 | DeepSeek | DeepSeek | Recompiler pipeline checks and documentation |
 | Antigravity | Google DeepMind | Architecture documentation, AGENTS.md, workflow governance |
+| Muse Spark | Meta | M3 device bring-up: native VU1/IOP wiring, GPU wedge + composition fixes, guest state/mode-machine reverse engineering, TEMP-DIAG instrumentation |
 
 ## Upstream
 

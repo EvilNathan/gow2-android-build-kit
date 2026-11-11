@@ -35,7 +35,7 @@ char g_logDir[kPathLen] = {0};
 size_t g_logBytesWritten = 0;
 uint32_t g_linesSinceFlush = 0;
 bool g_capLogged = false;
-constexpr size_t kMaxLogFileBytes = 10 * 1024 * 1024; // 10 MB cap
+constexpr size_t kMaxLogFileBytes = 80 * 1024 * 1024; // 80 MB cap (TEMP-DIAG: raised from 10 MB so a full boot + movie + transition fits in one log)
 
 // "HH:MM:SS.mmm" — never throws, no allocation.
 void FormatClock(char* out, size_t cap)

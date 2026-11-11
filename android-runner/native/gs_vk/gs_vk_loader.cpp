@@ -130,6 +130,7 @@ namespace gs_vk
         GSVK_LOAD(GetPhysicalDeviceSurfaceSupportKHR);
         GSVK_LOAD(GetPhysicalDeviceSurfaceCapabilitiesKHR);
         GSVK_LOAD(GetPhysicalDeviceSurfaceFormatsKHR);
+        GSVK_LOAD(GetPhysicalDeviceSurfacePresentModesKHR);
         GSVK_LOAD(CreateDevice);
         GSVK_LOAD(GetDeviceProcAddr);
         GSVK_LOAD(DestroySurfaceKHR);

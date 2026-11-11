@@ -163,3 +163,31 @@ Root causes fixed in `android-runner/native/gs_vk/gs_vk_backend.cpp`:
 | Probe builds | `.\scripts\build-gs-probe.ps1 -NoRun` | **pass** (clang, backend + engine GS + 7 SPIR-V blobs) |
 | Probe `clear` | `gs_probe.exe clear` (SwiftShader ×4 builds) | **pass** — corner pixel (255,192,128,255), alpha forced |
 | Probe `sprite`/`transfer` | same | still black on every SwiftShader build on this VM — pre-existing (see TASKS.md gate), needs a device or a healthy ICD to judge; the depth/input-attachment bisect flags above came out of it |
+
+## M3 — device bring-up and playability (2026-11-09 – 2026-11-11)
+
+Devices: Redfinger cloud phones over Tailscale + wireless ADB — Galaxy
+Note20 (SM-N9810, Mali-G77) until 2026-11-10, then Galaxy S25+ (SM-S936U1,
+Adreno, Android 15). Session log on device: `/sdcard/gow2/logs/gow2.log`.
+
+| Check | Evidence | Result |
+| --- | --- | --- |
+| ISO integrity | SHA-256 of `games/God of War II (USA).iso` = `266b08b7823c569be205dc9377b0e2212fbcb9080c4d65029f15040ae62d9f98` | **pass** — matches the hash computed on the phone |
+| APK static checks | `scripts/verify-android.sh` | **pass** 10/10 (package, launcher, arm64-v8a only, minSdk 28, 16 KB LOAD alignment, AArch64) |
+| Native IOP | device log `native code for` ×8 modules | **pass** |
+| Native VU1 | `[vu1-stats]`: 2,082 blocks, 0 interpreted fallbacks of note, ~20–24 ns/cycle (was ~254 interpreted) | **pass** — VU1 is no longer the bottleneck |
+| GPU wedge | 5,280+ frames / ~4.5 min with zero fence timeouts after the drawCircuit mid-pass flush fix | **pass** (Mali-G77) |
+| Swapchain | MAILBOX chosen on device; `[gs-ent]` acquire ≈10 ms per 5 s window (was ~2,600 ms FIFO) | **pass** |
+| Movie | deterministic end signature every run: displayed frames stop at 3,759, audio packets end at 0x699, `[0x2D8190]` 10 → 0 | **pass** |
+| Composition | render-target dumps: scene target and display target both hold the correct first-area scene (Kratos on the green hexagon platform); phone screenshot matches, upright, full-frame (present mode 1) | **pass** |
+| Mode machine | watch-thread log, full run: mode 0 → 3 → 4 → 11, then scripted SELECT → 12, X → 11, START → 13; `[gow2-modeedge]` lines show the SELECT press latch `[0x2D8F70]` 0→1 and release firing the 11→12 transition | **pass** |
+| Mode-13 branch | probe count `FUN_001E9310` ≈ 7,900 calls in mode 13 (2 lifetime calls in all pre-mode-13 runs) | **pass** |
+| Stability soak | mode-12 light regime: guest t=673 s (~19 min wall), flip 8.6 Hz sustained, no crash; mode 13 runs at 74–119 guest flips/s | **pass** |
+| Locomotion | stick held (up + square) for ~6–11 min in mode 13: screenshots and render-target dumps pixel-identical (0 changed px), player object shows no position-word change | **FAIL — open** (see TASKS.md M3 / Known issues) |
+
+Corrections recorded during this phase: the two SIGABRT run endings seen on
+2026-11-11 were artifacts of the TEMP-DIAG layer itself (a watch-thread
+null-RDRAM read and an unbounded loader-poll printer thread), not game
+crashes — with both fixed, the "light state" ran 21+ min with a constant
+thread count. The kit crash handler additionally aborted inside its own
+log-ring dump on two occasions, hiding the original faults (fix scheduled).

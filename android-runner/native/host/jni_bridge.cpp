@@ -327,6 +327,8 @@ void ApplySettingsJson(const char* json)
     SetEnvVar("PS2X_GS_HW_SCALE", scaleText);
     SetEnvVar("GOW_ASPECT", AspectEnvValue(aspect != nullptr ? *aspect : std::string("fill")));
     SetEnvVar("GOW2_PAD_SCRIPT", padScript != nullptr ? *padScript : std::string());
+    ps2x::host::Log("I/host", "TEMP-DIAG diag41 padScript setting: %s",
+                    padScript != nullptr ? padScript->c_str() : "(absent)");
     SetEnvVar("GOW2_AUDIO_VOLUME", volumeText);
     SetEnvVar("GOW2_PAD_DEADZONE", deadzoneText);
     SetEnvVar("PS2X_LOG_LEVEL", logLevel != nullptr ? *logLevel : std::string("info"));
@@ -342,7 +344,7 @@ void ApplySettingsJson(const char* json)
     }
     SetEnvVar("GOW_PERF_DIAG", std::string("1"));
     SetEnvVar("GOW_PERF_FRAME_PC", std::string("0x0014E380"));
-    SetEnvVar("GOW_GS_FINISH_ASINCRONO", std::string("1"));
+    SetEnvVar("GOW_GS_FINISH_ASINCRONO", std::string("1")); // TEMP-DIAG diag69: back to async FINISH (kit default). diag68 proved draw() CPU is only ~0.2 s of gs_ms ~3.6 s/5 s — the rest is fence-wait on GPU completion under sync finish.
     // Diagnostic build (kit patch 0006): IOP traces for the SCE-logo hang investigation
     // (SMPD completion path: LIBSD native calls, IOP->EE SIF DMA, SIF RPC, native stats).
     // GOW_SND_DIAG is intentionally not set here: its read site is a namespace-scope
@@ -355,6 +357,30 @@ void ApplySettingsJson(const char* json)
     // the sound bank loader. The sampled IOP import trace from diag2 is dropped
     // again: its volume perturbs IOP/EE timing.
     SetEnvVar("GOW_CD_TRACE", std::string("1"));
+    // VU1 diagnostics: the perf line attributes ~95% wall-clock to the VU
+    // bucket (guest ~2.2 flips/s). Print run/cycle/interpreter statistics
+    // every 5 s so the next device run shows whether native-block coverage
+    // or non-terminating microprograms are responsible.
+    SetEnvVar("GOW_VU1_STATS", std::string("1"));
+    // TEMP-DIAG (guest-state trace; revert after diagnosis): movie-player
+    // probes, periodic call profile and thread watch from the GOW2 overrides.
+    SetEnvVar("GOW2_MOVIE_TRACE", std::string("1")); // probes stay registered; prints are gated below
+    // TEMP-DIAG diag115: MOVIE_TRACE's change-prints flooded the 80 MB log cap
+    // in the mode-13 regime (17:49 cap hit hid the present wedge). Watch/mode
+    // lines + probe counts (printed by the watch) do not need the per-change
+    // prints; the overrides check this env to skip them.
+    SetEnvVar("GOW2_MOVIE_TRACE_PRINTS", std::string("0"));
+    SetEnvVar("GOW_MPEG_DIAG", std::string("1"));
+    SetEnvVar("GOW_MPEG_PICDUMP", std::string("1"));
+    SetEnvVar("GOW2_THREAD_WATCH", std::string("5"));
+    SetEnvVar("GOW_VBLANK_DIAG", std::string("1"));
+    SetEnvVar("GOW_VU1N_DIAG", std::string("1"));
+    SetEnvVar("GOW_VU1_BUDGET_DIAG", std::string("1"));
+    SetEnvVar("GOW2_PEEK", std::string("2D7F44,2D7F48,2D8104,2D8130,2D8154,2D81B4,2D8190,2D8108,2D810C,36A6A0,2E9240,2E9244,2E9254,2E925C,2E9280,2E9284,2D8138,2D8194,33E718,33E840,33E844,33E848,33E84C,33E850,33E854,33769C,3376A0,3376CC,3376DC,337700,337588,337584,33F380,33F384,33F388,33F38C,33F390,33F394,33F398,33F39C,33F3A0,33F3A4,33F3C8,33F3CC,33F3D0,33F3D4,33F3D8,33F3DC,33F3E0,33F3E4,33F3F8,33F404,33F408,33F578,33F57C,33F588,33F58C,33F5AC,33F5B0,33F5B4,33F5B8,33F5BC,33F5C0,33F5C4,33F5D8,33F5DC,33F5E0,369068,36906C,369070,369074,369078,369080,369084,369088,36908C,369090,369094,2D8110,2D8114,2D8118,369048,369058"));
+    // Native VU1/IOP code is generated from on-device captures
+    // (GOW_VU1_CAPTURA / PS2X_IOP_DUMP_MODULES) by scripts/gen-native.sh and
+    // compiled in via ps2xNativeVu1Dir; see generated/capture/. The capture
+    // envs are intentionally NOT set in production builds.
 }
 
 void GameThreadMain()

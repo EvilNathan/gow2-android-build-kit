@@ -2,10 +2,14 @@
 
 Statuses: `[ ]` todo, `[~]` in progress, `[x]` done, `[!]` blocked.
 
-_Last update: 2026-10-31 (M2 build side: the raw Vulkan GS backend is written,
-compiles for arm64, and is linked into the APK with the null-GS switch off.
-The offscreen probe reaches draw dispatch on SwiftShader; pixel-exact checks
-and device bring-up remain)._
+_Last update: 2026-11-11 (M3 device phase: the game boots, plays the opening
+movie and renders the first area on real hardware — Redfinger cloud phones,
+Mali-G77 then Adreno in a Galaxy S25+. Native VU1/IOP are generated and
+linked, GS composition is pixel-correct on screen, and the guest mode
+machine is mapped: post-movie the game waits in mode 11 and the sequence
+SELECT → X → START reaches mode 13. Remaining gate: the character does not
+yet move under stick input in mode 13. The working tree carries TEMP-DIAG
+instrumentation pending cleanup — see "Known issues".)_
 
 ## M0 — rebase onto PS2Recomp (done 2026-10-26)
 
@@ -50,9 +54,11 @@ and device bring-up remain)._
       `SetSdkInt`/`GetSdkInt` defined).
 - [x] Build the APK end to end with the host layer and the engine patches:
       `dist/gow2-android-debug.apk` (56 MB, null GS).
-- [ ] Install APK, import ISO, boot on device (no adb/device attached here).
-- [ ] Capture ≥300 frames of logcat with no fatal signal; record evidence in
-      `VERIFICATION.md`.
+- [x] Install APK, import ISO, boot on device (2026-11-09, Redfinger cloud
+      phone via Tailscale + ADB; ISO SHA-256 verified against the phone's own
+      hash — see `VERIFICATION.md`).
+- [x] Capture long device runs with no fatal signal (soaks of 19+ min);
+      evidence in `VERIFICATION.md`.
 
 ## M2 — raw Vulkan GS backend
 
@@ -93,61 +99,128 @@ and device bring-up remain)._
       compile of gs_vk + engine, 24 min full), `verify-android.ps1` all pass,
       79 gs_vk symbols present in `libps2EntryRunner.so`, no `libvulkan`
       DT_NEEDED (dlopen).
-- [ ] Host lifecycle with `ANativeWindow` (no raylib GL dependency) — window
-      attach/pacing code exists in the host layer; needs on-device exercise.
-- [ ] First pixels from the game; compare against PC OpenGL output (needs a
-      device: the CI VM's software rasterizers are not usable as a reference).
+- [x] Host lifecycle with `ANativeWindow` exercised on device (two phones:
+      Mali-G77, Adreno). GPU wedge root-caused (mid-render-pass flush in
+      `drawCircuit`) and fixed structurally; swapchain prefers MAILBOX with
+      a deeper image count (acquire time ~2,600 ms → ~10 ms per 5 s window).
+- [x] First pixels from the game on device, correct colours and composition
+      (2026-11-11): the corruption was in the display copy path — fixed by
+      the channel-shuffle gate relaxations and the CT32/CT24 direct texture
+      path in `draw()`; rotation on the portrait-native panel handled by
+      shader pre-rotation (present mode 1).
 - [ ] `tests/gs_units` (pure-CPU store/swizzle tests, no Vulkan) — directories
       are empty; the probe covers device paths instead.
 
 ## M3 — playability
 
-- [~] Touch/gamepad input and audio are implemented in the host layer but have
-      never run on a device.
-- [ ] VU1/IOP capture → native generators (needs a PC capture pass: boot the
-      desktop runner to the menu/first area with `GOW_VU1_CAPTURA` and the IOP
-      dump env vars).
-- [ ] `scripts/gen-native.ps1` exists but has not been run; the generated parts
-      must be fed to the Android build through `-DPS2X_ANDROID_NATIVE_VU1_DIR`.
-- [ ] Performance pass, device matrix, 16 KB + Android 15 validation.
+- [x] Device bring-up end to end: build → sign (stable local keystore) →
+      install → boot → log/screenshot loop fully automated from the Linux VM
+      over Tailscale + ADB to the cloud phone.
+- [x] VU1/IOP capture → native generators: pure-Python generators
+      (`tools/vu1/vu1n_gen.py`, `tools/iop/iopn_gen.py`); live-capture loop on
+      device grew VU1 coverage to **2,082 native blocks / 67 images** (the
+      post-movie microprogram overlays its own code region between frames, so
+      static capture alone was not enough). VU1 ≈254 → ~24 ns/cycle; IOP 8/8
+      modules native.
+- [x] Opening movie plays to completion on device (deterministic signature:
+      3,759 frames displayed, audio packets end at 0x699), then the first
+      playable area renders with correct composition.
+- [x] Scripted pad input (`padScript` in settings) verified at every layer:
+      Java → JNI → host pad state → guest pad struct, buttons and analog
+      floats alike.
+- [x] **Mode machine mapped** (guest global `[0x2D8EC0]`, evaluator
+      `FUN_0025AD58` from the per-frame checker, jump-table dispatch over
+      modes 0–20): boot 0 → title 3 → 4 → **11** (post-movie wait) →
+      **SELECT** (press latches `[0x2D8F70]`, release fires) → 12 →
+      **X** → 11 → **START** → **13**. In mode 13 the character branch
+      `FUN_001E9310` (gated on mode == 13 inside `FUN_001E6000`) runs
+      continuously (~7,900 calls in the verification run).
+- [!] **Character locomotion in mode 13**: with the stick held for minutes in
+      mode 13 the rendered scene is a fixed point and the player object's
+      first 256 bytes show no position change (only state fields +0x08
+      0→2 and +0x14 188→167 across the 11→13 transition). Pad delivery is
+      proven, so the gate is inside/beyond the mode-13 update — next step is
+      the action-block census (`+0x1F00..+0x1FFF` of the player object, where
+      `FUN_001E9310` and `padConsA` work) across stick directions.
+- [ ] Performance pass: `Present()` still serializes on a single fence
+      (~2 s per 5 s window in the heavy phases; guest ~8 flips/s there vs
+      ~88/s in the light modes). Fix candidate: double-buffered frame
+      resources. Device matrix + 16 KB / Android 15 validation after that.
+- [~] Touch overlay input reaches the guest pad state in tests only via the
+      script path so far; a manual on-screen play session is still pending
+      (blocked on locomotion).
 
 ## Open TODOs (ordered, for the next session)
 
-1. **Device re-test after the 2026-11-03 black-screen fixes** (user-driven):
-   install the new `dist/gow2-android-debug.apk`, import the ISO, capture
-   `gow2.log` + screenshot on the Mali-G610 device. Expectation: textures now
-   upload from the correct staging offset (the log's black screen with
-   `presented OK` was corrupt texture/CLUT uploads), FPS no longer collapses
-   to 0.4 host_hz (image reuse + legal in-pass barriers). If pixels appear,
-   move on to comparing against the PC OpenGL renderer.
-2. **Pixel-exact probe cases on a device or a working desktop ICD**: run
-   `gs_probe` (`scripts/build-gs-probe.ps1`) where the Vulkan implementation
-   does not trap; the harness reports per-case verdicts. `clear` passes on
-   this VM now; `sprite`/`transfer` still draw black on every available
-   SwiftShader build (4 tried, incl. the nodual shader path) — treat the VM's
-   SwiftShader as unusable for draw-path validation until an ICD that passes
-   `clear`+`sprite` is found (diagnostic env flags: `PS2X_VK_VALIDATION=1`,
-   `PS2X_VK_NO_DEPTH=1`).
-3. **PC capture pass** for native VU1/IOP (`GOW_VU1_CAPTURA`, IOP module dump),
-   then `scripts/gen-native.ps1`, then measure the FPS gain on the desktop
-   runner before trusting it on the phone.
-4. **Desktop runner run** (`scripts/run-headless.ps1`) is still unverified on
-   this machine; only the `ps2_runtime` target has been compiled here (no GPU
-   session). The patched engine compiles on MSVC.
+1. **Mode-13 locomotion gate** (the playable blocker): census the player
+   object's action block `+0x1F00..+0x1FFF` plus the pad analog floats across
+   stick directions in mode 13 (diag119 build already prints them in the
+   watch thread); read the mode-13 update body (`FUN_0025D370`) and
+   `FUN_001E9310` for the field it waits on; then a causal force-test in the
+   style of the earlier `force394` facility — checking the *first* gate in
+   the chain this time.
+2. **Present-path performance**: double-buffer frame resources (2 command
+   buffers / fences / rings / descriptor pools; wait on the previous frame's
+   fence) so the heavy phases are not serialized by `Present()`.
+3. **TEMP-DIAG cleanup** (once playable): remove the probe/watch/dump
+   instrumentation from `overrides/gow2_overrides.cpp`,
+   `android-runner/native/gs_vk/gs_vk_backend.cpp` and
+   `android-runner/native/host/jni_bridge.cpp`; restore the 10 MB log cap in
+   `host/log.cpp`; hard-code rotation mode 1 (condition: surface transform
+   == ROTATE_90) and delete the `present_mode.txt` experiment; keep the
+   permanent fixes (circuit flush guard, MAILBOX swapchain, shuffle gate
+   relaxations, CT32 present path, watch null-RDRAM guard + loader-poll
+   spawn-once fix if those facilities survive in any form).
+4. **Crash-handler robustness**: clamp the LogRingDump copy in
+   `host/crash.cpp` — the handler itself aborted under fortify while writing
+   two earlier crash reports, hiding the original faults. The `dladdr`
+   frame annotation added there is worth keeping permanently.
+5. **Playable verification + M3 release**: full run — boot → title → movie →
+   SELECT/X/START sequence → character moves → 10 min stable — then publish
+   `v0.5.0-m3` to `EvilNathan/gow2-android-apk` and make the sequence part of
+   the shipped default `padScript` (title taps + post-movie SELECT ≈t400,
+   X ≈t500, START ≈t740 in wall-clock script seconds at current speeds).
 
-Done in the 2026-10-30 session: day-one patch stack rebased so `0001`–`0004`
-apply from a pristine `PS2Recomp` checkout (`+183/−8`), LF checkout forced in
-`scripts/_common.ps1`, app/manifest/Gradle wiring, `verify-android.ps1`,
-`docs/ANDROID.md`, and the first full APK build with the host layer.
+## Known issues (kendala)
+
+- [!] **Locomotion gate in mode 13** — see M3 above. Everything upstream is
+      proven: pad bits/floats reach the guest, the mode machine advances,
+      the mode-13 branch runs. The scene stays a fixed point under stick
+      input.
+- The kit's crash handler can itself abort while dumping the log ring
+  (fortify `__memcpy_chk`); two historical crashes (2026-11-11) lost their
+  original fault this way. Fix scheduled in TODO 4.
+- The on-device session log (`/sdcard/gow2/logs/gow2.log`) is append-only and
+  the TEMP-DIAG build caps it at 80 MB; delete it before every launch or
+  later samples silently read a capped, stale log.
+- AGP's debug certificate is not stable across build environments, so test
+  APKs are re-signed with a local stable keystore before `pm install -r`
+  (otherwise `INSTALL_FAILED_UPDATE_INCOMPATIBLE`); after a reinstall the
+  all-files-access appop must be re-granted.
+- Shaders are compiled and embedded at CMake *configure* time;
+  `android-runner/native/CMakeLists.txt` now declares
+  `CMAKE_CONFIGURE_DEPENDS` on the shader sources — without it, shader edits
+  silently never reach the APK.
+- VM restarts interrupt long builds; recovery is simply re-running
+  `scripts/build-android.sh` after checking the `dist/` APK timestamp.
 
 ## Known constraints
 
 - VU1 native generation is disabled *by the engine CMake* on Android
   (`PS2X_IS_ANDROID`); the kit path is host-side codegen plus
   `PS2X_ANDROID_NATIVE_VU1_DIR` (registration is by static initialisers, so no
-  engine patch is needed).
-- No adb/device automation on this machine: device verification is manual.
-- 4 build cores; a full Android native build is ~20 min and the generated code
-  dominates it. An incremental host-only rebuild is ~30 s.
+  engine patch is needed). VU1 parts must be built as a separate OBJECT
+  library (each part defines the same registration symbol, so they cannot
+  join the unity build).
+- Device automation *does* exist on the Linux VM used for the 2026-11
+  sessions: the Redfinger cloud phone joins the tailnet and is driven over
+  Tailscale + wireless ADB (install via `adb push` + `pm install -r`;
+  direct `adb install` is unreliable over the tunnel). The Windows
+  workstation still has no attached device.
+- The Linux VM's `/tmp` is small (512 MB): Gradle/Android builds must run
+  with `TMPDIR` and `-Djava.io.tmpdir` pointed at a home-disk directory or
+  they fail with disk-full / shared-memory errors.
+- Incremental rebuilds on the Linux VM take ~2–3.5 min (host + overrides);
+  the first full build took ~47 min.
 - Heavy outputs (`build/`, `generated/`, `games/`, Gradle caches) live on `D:`
   through junctions because `C:` has ~14 GB free.

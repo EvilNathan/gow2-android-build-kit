@@ -99,6 +99,17 @@ namespace
                          static_cast<int32_t>(GPR_U32(ctx, 2)), server);
     }
 
+    // TEMP-DIAG: FlushCache (0x2CFBA0) call counter, printed as a delta by
+    // the watch thread below.
+    std::atomic<uint64_t> g_flushCacheCount{0};
+    uint64_t g_flushCachePrev = 0;
+
+    // TEMP-DIAG diag37: forward declaration so the watch thread can print the
+    // movie-probe call counters (the probe array is defined further below).
+    void gow2PrintProbeCounts();
+    // TEMP-DIAG diag40: same for the libpad2 override call counters.
+    void gow2PrintPadCounts();
+
     // GOW2_THREAD_WATCH=<s>: cada <s> segundos, los hilos del EE (estado, espera, pc, ra) y, con GOW2_BOOT_TRACE,
     // los contadores de arranque. Para bloqueos silenciosos (como GOW_THREAD_WATCH en GoW1).
     void gow2StartWatch(PS2Runtime &runtime, double period, bool bootTrace)
@@ -107,13 +118,87 @@ namespace
             for (;;)
             {
                 std::this_thread::sleep_for(std::chrono::duration<double>(period));
+                // TEMP-DIAG diag96: never dereference guest RAM while it is
+                // unavailable (teardown / reinit windows) -- a null RDRAM base
+                // turned a watch memcpy into a SIGSEGV at the raw guest
+                // address in the diag95 run.
+                if (runtime.memory().getRDRAM() == nullptr)
+                    continue;
+                // TEMP-DIAG diag101: causal test -- while the flag file exists,
+                // force the player object's +0x394 gate field to 1 every pass.
+                if (FILE *ff = std::fopen("/sdcard/gow2/force394.txt", "r"))
+                {
+                    std::fclose(ff);
+                    uint8_t *ram = runtime.memory().getRDRAM();
+                    const uint32_t v = 1u;
+                    std::memcpy(ram + ((0x0071D288u + 0x394u) & 0x01FFFFFFu), &v, 4);
+                    std::fprintf(stderr, "[gow2-watch]   force394 applied\n");
+                }
                 const EeKernelSnapshot snapshot = runtime.eeScheduler().snapshot();
+                {
+                    // TEMP-DIAG diag113: mode timeline from the watch thread.
+                    auto wdm = [&runtime](uint32_t a) { uint32_t v; std::memcpy(&v, runtime.memory().getRDRAM() + (a & 0x01FFFFFCu), 4); return v; };
+                    std::fprintf(stderr, "[gow2-watch]   mode=%u g869c=%08x g86a0=%08x f70=%u f74=%u\n",
+                                 wdm(0x002D8EC0u), wdm(0x002D869Cu), wdm(0x002D86A0u),
+                                 wdm(0x002D8F70u), wdm(0x002D8F74u));
+                    // TEMP-DIAG diag116/117: player-object words; diag116's
+                    // +0x80..+0xBF range was static (pointers only), so diag117
+                    // scans +0x00..+0xFF in four lines to find the live fields
+                    // (position/animation) that change under input.
+                    for (int ln = 0; ln < 4; ++ln)
+                    {
+                        const uint32_t base = 0x0071D288u + static_cast<uint32_t>(ln * 64);
+                        std::fprintf(stderr, "[gow2-watch]   pobj%d %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                                     ln,
+                                     wdm(base + 0x00u), wdm(base + 0x04u), wdm(base + 0x08u), wdm(base + 0x0Cu),
+                                     wdm(base + 0x10u), wdm(base + 0x14u), wdm(base + 0x18u), wdm(base + 0x1Cu),
+                                     wdm(base + 0x20u), wdm(base + 0x24u), wdm(base + 0x28u), wdm(base + 0x2Cu),
+                                     wdm(base + 0x30u), wdm(base + 0x34u), wdm(base + 0x38u), wdm(base + 0x3Cu));
+                    }
+                    // TEMP-DIAG diag119: the +0x1F00 action block (padConsA /
+                    // FUN_001E9310 territory) in full, plus pad0's cooked
+                    // buttons and analog floats, to see what the stick reaches
+                    // in mode 13 and which fields never move.
+                    for (int ln = 0; ln < 4; ++ln)
+                    {
+                        const uint32_t base = 0x0071D288u + 0x1F00u + static_cast<uint32_t>(ln * 64);
+                        std::fprintf(stderr, "[gow2-watch]   pact%d %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                                     ln,
+                                     wdm(base + 0x00u), wdm(base + 0x04u), wdm(base + 0x08u), wdm(base + 0x0Cu),
+                                     wdm(base + 0x10u), wdm(base + 0x14u), wdm(base + 0x18u), wdm(base + 0x1Cu),
+                                     wdm(base + 0x20u), wdm(base + 0x24u), wdm(base + 0x28u), wdm(base + 0x2Cu),
+                                     wdm(base + 0x30u), wdm(base + 0x34u), wdm(base + 0x38u), wdm(base + 0x3Cu));
+                    }
+                    std::fprintf(stderr, "[gow2-watch]   padax btn=%08x ax38=%08x ax3c=%08x ax58=%08x ax5c=%08x b20=%08x\n",
+                                 wdm(0x0032F3A8u), wdm(0x0032F3B8u), wdm(0x0032F3BCu), wdm(0x0032F3D8u), wdm(0x0032F3DCu), wdm(0x0032F3A0u));
+                }
                 std::fprintf(stderr, "[gow2-watch] running=%d cycle=%llu\n", snapshot.runningThreadId,
                              static_cast<unsigned long long>(snapshot.eeCycle));
+                {
+                    const uint64_t now = g_flushCacheCount.load(std::memory_order_relaxed);
+                    std::fprintf(stderr, "[gow2-watch]   flushcache delta=%llu total=%llu\n",
+                                 static_cast<unsigned long long>(now - g_flushCachePrev),
+                                 static_cast<unsigned long long>(now));
+                    g_flushCachePrev = now;
+                }
                 for (const EeThreadSnapshot &t : snapshot.threads)
                 {
-                    std::fprintf(stderr, "[gow2-watch]   thread id=%d prio=%d status=%d wait=%d/%d pc=%08x ra=%08x sp=%08x\n", t.id,
-                                 t.currentPriority, int(t.status), int(t.waitReason), t.waitId, t.pc, t.ra, t.sp);
+                    std::fprintf(stderr, "[gow2-watch]   thread id=%d prio=%d status=%d wait=%d/%d pc=%08x ra=%08x sp=%08x inv=%u\n", t.id,
+                                 t.currentPriority, int(t.status), int(t.waitReason), t.waitId, t.pc, t.ra, t.sp, t.invocationDepth);
+                    // TEMP-DIAG: the SM loader-wait loop (0x1EAAE0) parks its
+                    // request-list item pointer on the stack: the outer frame
+                    // keeps it at sp+0x40 (walker frame) / sp+0x68. Dump the
+                    // top of the stack so the pending request (state + name)
+                    // can be identified in the post-movie phase.
+                    if (t.id == snapshot.runningThreadId && t.stackSize != 0u)
+                    {
+                        const uint8_t *ram = runtime.memory().getRDRAM();
+                        auto sword = [ram](uint32_t a) { uint32_t v; std::memcpy(&v, ram + (a & 0x01FFFFFFu), 4); return v; };
+                        std::fprintf(stderr, "[gow2-watch]     stack:");
+                        for (uint32_t off = 0u; off < 0x80u; off += 4u)
+                            std::fprintf(stderr, " +%02x=%08x", off, sword(t.sp + off));
+                        std::fprintf(stderr, "\n");
+                    }
                     if (t.pc == 0x0027D7E8u) // bucle de lista de 0x27D788: [sp] = cabeza, [sp+4] = iterador, nodo: +0 next, +8 objeto
                     {
                         const uint8_t *ram = runtime.memory().getRDRAM();
@@ -139,6 +224,116 @@ namespace
                     std::fprintf(stderr, "[gow2-watch]   tree sentinel=%08x pool=%08x distance=0x%x heap=[%08x,%08x)\n", sentinel, pool,
                                  sentinel - pool, runtime.guestHeapBase(), runtime.guestHeapLimit());
                 }
+                // TEMP-DIAG diag36: raw dump of the display/frame-config structs
+                // (0x369000..0x3690C0 and 0x33F300..0x33F600) in 256-byte chunks
+                // so no field is lost to the 512-char stdio line split.
+                {
+                    const uint8_t *ram = runtime.memory().getRDRAM();
+                    for (uint32_t base : {0x00369000u, 0x0033F300u, 0x0033F480u, 0x0037A6B8u})
+                    {
+                        std::fprintf(stderr, "[gow2-watch]   dump %06x:", base);
+                        for (uint32_t off = 0u; off < 0x100u; off += 4u)
+                        {
+                            uint32_t v;
+                            std::memcpy(&v, ram + ((base + off) & 0x01FFFFFFu), 4);
+                            std::fprintf(stderr, " %08x", v);
+                        }
+                        std::fprintf(stderr, "\n");
+                    }
+                }
+                // TEMP-DIAG diag37: one short state line per pass (fits the
+                // 512-char stdio split, unlike the long GOW2_PEEK line):
+                // game object + its +0x5AC field, the state id [0x2D8624] and
+                // its two neighbours, the movie object pointer and the movie
+                // player state/buffer fields at 0x337580+0x24/+0x28.
+                {
+                    const uint8_t *ram = runtime.memory().getRDRAM();
+                    auto word = [ram](uint32_t a) { uint32_t v; std::memcpy(&v, ram + (a & 0x01FFFFFFu), 4); return v; };
+                    const uint32_t game = word(0x002D7A24u);
+                    std::fprintf(stderr,
+                                 "[gow2-watch]   state game=%08x game5ac=%d stateId=%08x s86dc=%08x s8fdc=%08x movie=%08x "
+                                 "pbuf=%08x pstate=%08x\n",
+                                 game, game ? static_cast<int32_t>(word(game + 0x5ACu)) : -1, word(0x002D8624u),
+                                 word(0x002D86DCu), word(0x002D8FDCu), word(0x00337700u), word(0x00337584u),
+                                 word(0x003375A8u));
+                    { // TEMP-DIAG diag83: state chain from [0x2D8624] via +0x50 links (statusReader's walk):
+                      // per node print addr, u16 state index at +0, next ptr; plus [0x2D814C] (obj22 state).
+                        auto half = [ram](uint32_t a) { uint16_t v; std::memcpy(&v, ram + (a & 0x01FFFFFFu), 2); return v; };
+                        uint32_t node = word(0x002D8624u);
+                        std::fprintf(stderr, "[gow2-watch]   chain 814c=%08x:", word(0x002D814Cu));
+                        uint32_t tail = 0u;
+                        for (int i = 0; i < 6 && node != 0u; ++i)
+                        {
+                            tail = node;
+                            std::fprintf(stderr, " [%08x id=%u nx=%08x]", node, half(node), word(node + 0x50u));
+                            const uint32_t next = word(node + 0x50u);
+                            if (next == node)
+                                break;
+                            node = next;
+                        }
+                        { // TEMP-DIAG diag87: one-time dump of the whole state table (id -> handler fn).
+                            static bool dumped = false;
+                            if (!dumped)
+                            {
+                                dumped = true;
+                                std::fprintf(stderr, "[gow2-watch]   statetab:");
+                                for (uint32_t id = 0u; id < 40u; ++id)
+                                {
+                                    const uint32_t e = word(0x00362C48u + id * 4u);
+                                    const uint32_t s = e != 0u ? word(e + 0x20u) : 0u;
+                                    const uint32_t f = s != 0u ? word(s + 0x84u) : 0u;
+                                    std::fprintf(stderr, " %u=%08x", id, f);
+                                }
+                                std::fprintf(stderr, "\n");
+                            }
+                        }
+                        if (tail != 0u)
+                        { // TEMP-DIAG diag84: resolve the tail state's handler like checker1 does:
+                          // entry=[0x362C48+id*4]; sub=[entry+0x20]; adj=lh[sub+0x80]; fn=[sub+0x84].
+                            const uint32_t id = half(tail);
+                            const uint32_t entry = word(0x00362C48u + id * 4u);
+                            const uint32_t sub = entry != 0u ? word(entry + 0x20u) : 0u;
+                            const int16_t adj = sub != 0u ? static_cast<int16_t>(half(sub + 0x80u)) : 0;
+                            const uint32_t fn = sub != 0u ? word(sub + 0x84u) : 0u;
+                            std::fprintf(stderr, " handler id=%u entry=%08x sub=%08x adj=%d fn=%08x self=%08x",
+                                         id, entry, sub, static_cast<int>(adj), fn,
+                                         static_cast<uint32_t>(tail + adj));
+                            // TEMP-DIAG diag85: state-stack of the class object (entry): depth byte at
+                            // entry+0xC8, stack slots at entry+0x48 (8 words); instance fields the
+                            // dispatcher reads: u16 at tail+2, words at tail+0x4C / tail+0x9C.
+                            auto byteAt = [ram](uint32_t a) { return static_cast<uint32_t>(ram[a & 0x01FFFFFFu]); };
+                            std::fprintf(stderr, " stk depth=%u slots=%08x,%08x,%08x,%08x,%08x,%08x inst2=%u i4c=%08x i9c=%08x",
+                                         byteAt(entry + 0xC8u), word(entry + 0x48u), word(entry + 0x4Cu),
+                                         word(entry + 0x50u), word(entry + 0x54u), word(entry + 0x58u),
+                                         word(entry + 0x5Cu), half(tail + 2u), word(tail + 0x4Cu), word(tail + 0x9Cu));
+                            // TEMP-DIAG diag86: instance queue words (tail+0x30..0x57) and the timing
+                            // block func_268B60 consumes: float bits at [[0x2D9008]+0x1A0], [0x2D80C8],
+                            // [0x2D80DC], plus the VBlank counter [0x2D8108].
+                            const uint32_t clk = word(0x002D9008u);
+                            std::fprintf(stderr, " g86e0=%08x g86e4=%08x g86e8=%08x g86ec=%08x g86f0=%08x",
+                                         word(0x002D86E0u), word(0x002D86E4u), word(0x002D86E8u), word(0x002D86ECu),
+                                         word(0x002D86F0u));
+                            std::fprintf(stderr, " q=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x clk=%08x t1a0=%08x f80c8=%08x f80dc=%08x vb=%u",
+                                         word(tail + 0x30u), word(tail + 0x34u), word(tail + 0x38u), word(tail + 0x3Cu),
+                                         word(tail + 0x40u), word(tail + 0x44u), word(tail + 0x48u), word(tail + 0x4Cu),
+                                         clk, clk != 0u ? word(clk + 0x1A0u) : 0u, word(0x002D80C8u), word(0x002D80DCu),
+                                         word(0x002D8108u));
+                        }
+                        std::fprintf(stderr, "\n");
+                    }
+                    // TEMP-DIAG diag38: pad structs (base 0x32F380 + i*0x1C0; diag39 fixed the base: 0x330000-0xC80):
+                    // +0x28 buttons, +0x2C last GetState, +0x78 socket, +0x7C
+                    // phase counter (0=profile, 1=read, >=2 poll skips both),
+                    // +0x80, +0x84, +0x8C.
+                    std::fprintf(stderr,
+                                 "[gow2-watch]   pad0 sock=%08x cnt=%08x f80=%08x f84=%08x f8c=%08x btn=%08x gs=%08x | "
+                                 "pad1 sock=%08x cnt=%08x f80=%08x btn=%08x gs=%08x\n",
+                                 word(0x0032F3F8u), word(0x0032F3FCu), word(0x0032F400u), word(0x0032F404u),
+                                 word(0x0032F40Cu), word(0x0032F3A8u), word(0x0032F3ACu), word(0x0032F5B8u),
+                                 word(0x0032F5BCu), word(0x0032F5C0u), word(0x0032F568u), word(0x0032F56Cu));
+                }
+                gow2PrintProbeCounts();
+                gow2PrintPadCounts();
                 // GOW2_PEEK=dir,dir,…: palabras de memoria del EE (hex) en cada pasada, para seguir variables del juego
                 if (const char *peek = std::getenv("GOW2_PEEK"))
                 {
@@ -154,6 +349,24 @@ namespace
                         cursor = (end && *end == ',') ? end + 1 : nullptr;
                     }
                     std::fprintf(stderr, "\n");
+                }
+                // TEMP-DIAG: dump live VU1 micro-memory on demand (flag file)
+                {
+                    FILE *flag = std::fopen("/sdcard/gow2/dump_vu1.txt", "r");
+                    if (flag)
+                    {
+                        std::fclose(flag);
+                        std::remove("/sdcard/gow2/dump_vu1.txt");
+                        const uint8_t *code = runtime.memory().getVU1Code();
+                        FILE *out = std::fopen("/sdcard/gow2/vu1live.bin", "wb");
+                        if (out)
+                        {
+                            std::fwrite(code, 1, 16384, out);
+                            std::fclose(out);
+                        }
+                        std::fprintf(stderr, "[gow2-watch]   vu1live dumped gen=%llu\n",
+                                     static_cast<unsigned long long>(runtime.memory().getVU1CodeGeneration()));
+                    }
                 }
                 if (bootTrace)
                     for (const Gow2BootCall &call : g_gow2BootCalls)
@@ -231,12 +444,67 @@ namespace
         PS2Runtime::RecompiledFunction original;
         std::atomic<uint32_t> calls;
         std::atomic<uint32_t> lastV0;
+        bool countOnly; // TEMP-DIAG diag89: count without the change-log (high-frequency handlers flood the log)
     };
     Gow2MovieProbe g_gow2MovieProbes[] = {
         {0x00191AB0u, "frame", nullptr, {0u}, {0xDEADBEEFu}},   {0x00191BD0u, "done", nullptr, {0u}, {0xDEADBEEFu}},
         {0x0025EF40u, "quit25ef40", nullptr, {0u}, {0xDEADBEEFu}}, {0x002AC058u, "sceMpegIsEnd", nullptr, {0u}, {0xDEADBEEFu}},
         {0x0018FE08u, "check18fe08", nullptr, {0u}, {0xDEADBEEFu}}, {0x002A89D0u, "spuPos5b", nullptr, {0u}, {0xDEADBEEFu}},
-        {0x00190488u, "adpcmFeed", nullptr, {0u}, {0xDEADBEEFu}}};
+        {0x00190488u, "adpcmFeed", nullptr, {0u}, {0xDEADBEEFu}},
+        // TEMP-DIAG diag35: boot-chain probes (entry code in _start -> CRT init -> main loop)
+        {0x00146318u, "crtInit", nullptr, {0u}, {0xDEADBEEFu}}, {0x0014AB58u, "nodePoolInit", nullptr, {0u}, {0xDEADBEEFu}},
+        {0x0014B778u, "nodeAlloc", nullptr, {0u}, {0xDEADBEEFu}}, {0x0025A1F0u, "mainLoop", nullptr, {0u}, {0xDEADBEEFu}},
+        {0x00188E08u, "perFrame", nullptr, {0u}, {0xDEADBEEFu}}, {0x001910A8u, "moviePlay", nullptr, {0u}, {0xDEADBEEFu}},
+        {0x00190E88u, "openMovie", nullptr, {0u}, {0xDEADBEEFu}},
+        // TEMP-DIAG diag37: frame-loop counting probes (first call always logs;
+        // totals are also printed by the watch thread via gow2PrintProbeCounts)
+        {0x001888B8u, "updatePads", nullptr, {0u}, {0xDEADBEEFu}}, {0x00188BA8u, "padPoll", nullptr, {0u}, {0xDEADBEEFu}},
+        {0x00186C48u, "frameSubmit", nullptr, {0u}, {0xDEADBEEFu}}, {0x00186D38u, "syncV", nullptr, {0u}, {0xDEADBEEFu}},
+        {0x00186E08u, "frameDriver", nullptr, {0u}, {0xDEADBEEFu}}, {0x0014D830u, "eventDispatch", nullptr, {0u}, {0xDEADBEEFu}},
+        {0x0025ED60u, "checker1", nullptr, {0u}, {0xDEADBEEFu}}, {0x0025EDE0u, "checker2", nullptr, {0u}, {0xDEADBEEFu}},
+        {0x001EF7F8u, "statusReader", nullptr, {0u}, {0xDEADBEEFu}}, {0x001EA8D8u, "setState", nullptr, {0u}, {0xDEADBEEFu}},
+        {0x0018ADD0u, "waitGsFinish", nullptr, {0u}, {0xDEADBEEFu}},
+        // TEMP-DIAG diag88: state-class handlers from the live table (diag87 dump):
+        // A=ids 0,2,5,10,11,13,19; B=id 1; C=ids 3,6-9,12,15-18,20,21,23,27,32; D=id 4; E=id 25.
+        {0x0027B9E8u, "stA", nullptr, {0u}, {0xDEADBEEFu}, true}, {0x0027CB48u, "stB", nullptr, {0u}, {0xDEADBEEFu}, true},
+        {0x00288EB8u, "stC", nullptr, {0u}, {0xDEADBEEFu}, true}, {0x0028A6D0u, "stD", nullptr, {0u}, {0xDEADBEEFu}, true},
+        {0x00289910u, "stE", nullptr, {0u}, {0xDEADBEEFu}, true}, {0x0027D6B0u, "stDisp", nullptr, {0u}, {0xDEADBEEFu}, true},
+        // TEMP-DIAG diag90: the only two functions that reference the pad array base (0x32F380)
+        // directly -- the pad consumers (character controller / mode manager candidates).
+        {0x001E5AF0u, "padConsA", nullptr, {0u}, {0xDEADBEEFu}, true}, {0x0025CEC8u, "padConsB", nullptr, {0u}, {0xDEADBEEFu}, true},
+        // TEMP-DIAG diag97: padConsA's only direct caller -- the ratio padConsA/caller6000
+        // measures how often its internal v1 gate skips the pad consumer.
+        {0x001E6000u, "caller6000", nullptr, {0u}, {0xDEADBEEFu}, true},
+        // TEMP-DIAG diag100: census of the guest functions that write the player
+        // object's +0x394 field (the gate that blocks padConsA's substantive work).
+        {0x001776B8u, "w394a", nullptr, {0u}, {0xDEADBEEFu}, true}, {0x001E1CD0u, "w394b", nullptr, {0u}, {0xDEADBEEFu}, true},
+        {0x001E4650u, "w394c", nullptr, {0u}, {0xDEADBEEFu}, true}, {0x001E6848u, "w394d", nullptr, {0u}, {0xDEADBEEFu}, true},
+        {0x001E6E88u, "w394e", nullptr, {0u}, {0xDEADBEEFu}, true}, {0x0025A748u, "w394f", nullptr, {0u}, {0xDEADBEEFu}, true},
+        {0x0025A7F0u, "w394g", nullptr, {0u}, {0xDEADBEEFu}, true}, {0x0025A898u, "w394h", nullptr, {0u}, {0xDEADBEEFu}, true},
+        {0x0025A978u, "w394i", nullptr, {0u}, {0xDEADBEEFu}, true}, {0x0025AA00u, "w394j", nullptr, {0u}, {0xDEADBEEFu}, true},
+        // TEMP-DIAG diag103: FUN_0025BA00 is the only standing writer of a nonzero
+        // "action request" into the player object's +0x1FA4 slot; FUN_001E6170 is
+        // its clearer twin called from the same caller (FUN_001E6000).
+        {0x0025BA00u, "postReq", nullptr, {0u}, {0xDEADBEEFu}, true}, {0x001E6170u, "clrReq", nullptr, {0u}, {0xDEADBEEFu}, true},
+        // TEMP-DIAG diag105: FUN_001E6000's conditional callees -- func_1E9310 runs
+        // only when [0x2D8EC0]==13, func_1E9BD0 only when [0x2D8EC0]==3 && [0x2D8F28]>0.
+        {0x001E9310u, "call9310", nullptr, {0u}, {0xDEADBEEFu}, true}, {0x001E9BD0u, "call9bd0", nullptr, {0u}, {0xDEADBEEFu}, true},
+        {0x001E72A0u, "call72a0", nullptr, {0u}, {0xDEADBEEFu}, true},
+        // TEMP-DIAG diag106: FUN_0025AAC0 is the mode setter for the global at
+        // [0x2D8EC0] (frozen at 11; the character update wants 13 or 3 to run its
+        // substantive branches). Its a0 history is captured in the wrapper.
+        {0x0025AAC0u, "modeSet", nullptr, {0u}, {0xDEADBEEFu}, true},
+        // TEMP-DIAG diag107: the direct writers of [0x2D8EC0] (modeSet never runs,
+        // yet the mode is 11 -- one of these must write it).
+        {0x0025BEA0u, "mwA", nullptr, {0u}, {0xDEADBEEFu}, true}, {0x0025BFC8u, "mwB", nullptr, {0u}, {0xDEADBEEFu}, true},
+        {0x0025C178u, "mwC", nullptr, {0u}, {0xDEADBEEFu}, true}, {0x0025C780u, "mwD", nullptr, {0u}, {0xDEADBEEFu}, true},
+        {0x0025C7D8u, "mwE", nullptr, {0u}, {0xDEADBEEFu}, true},
+        // TEMP-DIAG diag108: the mode evaluator's lookup -- NOT countOnly, so the
+        // generic wrapper logs its return value whenever it changes (0 = the
+        // evaluator short-circuits and the mode can never advance).
+        {0x001E4CE0u, "lookupMode", nullptr, {0u}, {0xDEADBEEFu}, false}};
+
+    uint32_t g_gow2LastLookupObj = 0; // TEMP-DIAG diag109: last lookupMode result
 
     void gow2MovieProbeWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -246,8 +514,111 @@ namespace
                 probe = &p;
         if (!probe || !probe->original)
             return;
+        if (probe->address == 0x001E5AF0u)
+        {
+            // TEMP-DIAG diag97: one-shot capture of padConsA's object argument
+            // (a0) and the two fields its body gates on (+0x1F9C / +0x1FFC).
+            static uint32_t lastA0 = 0xDEADBEEFu;
+            static uint32_t lastKey = 0xDEADBEEFu;
+            const uint32_t a0 = GPR_U32(ctx, 4);
+            auto wd = [rdram](uint32_t a) { uint32_t v; std::memcpy(&v, rdram + (a & 0x01FFFFFCu), 4); return v; };
+            const uint32_t f1fa0 = a0 ? wd(a0 + 0x1FA0u) : 0u, f394 = a0 ? wd(a0 + 0x394u) : 0u;
+            const uint32_t key = (f1fa0 ^ (f394 << 1)) + (a0 != lastA0 ? 0x5555u : 0u);
+            const uint32_t callNo = probe->calls.load(std::memory_order_relaxed) + 1u;
+            if (a0 != lastA0 || key != lastKey || callNo % 500u == 0u)
+            {
+                lastA0 = a0;
+                lastKey = key;
+                std::fprintf(stderr, "[gow2-padcap] call=%u a0=%08x f1f9c=%08x f1ffc=%08x f1fa0=%08x f394=%08x t1fb0=%08x t1fb4=%08x s1fa8=%08x s1fac=%08x g80d8=%08x\n",
+                             callNo, a0,
+                             a0 ? wd(a0 + 0x1F9Cu) : 0u, a0 ? wd(a0 + 0x1FFCu) : 0u, f1fa0, f394,
+                             a0 ? wd(a0 + 0x1FB0u) : 0u, a0 ? wd(a0 + 0x1FB4u) : 0u,
+                             a0 ? wd(a0 + 0x1FA8u) : 0u, a0 ? wd(a0 + 0x1FACu) : 0u, wd(0x002D80D8u));
+                if (a0 && callNo % 500u == 0u)
+                {
+                    const uint32_t lo = g_gow2LastLookupObj;
+                    const uint32_t sub = lo ? wd(lo + 0xE0u) : 0u;
+                    std::fprintf(stderr, "[gow2-padcap]   mode g8ec0=%08x g8f28=%08x g86ec=%08x k85e4=%08x k8650=%08x g8ef0=%08x lkobj=%08x lkf=%08x f70=%08x f74=%08x f34=%08x btn=%08x btnp=%08x\n",
+                                 wd(0x002D8EC0u), wd(0x002D8F28u), wd(0x002D86ECu),
+                                 wd(0x002D85E4u), wd(0x002D8650u), wd(0x002D8EF0u), lo,
+                                 sub ? wd(sub + 0xC84u) : 0u,
+                                 wd(0x002D8F70u), wd(0x002D8F74u), wd(0x002D8F34u),
+                                 wd(0x0032F3A8u), wd(0x0032F3ACu));
+                }
+                if (a0 && callNo % 500u == 0u)
+                {
+                    std::fprintf(stderr, "[gow2-padcap]   blk390:");
+                    for (uint32_t o = 0x390u; o < 0x3D0u; o += 4u)
+                        std::fprintf(stderr, " %08x", wd(a0 + o));
+                    std::fprintf(stderr, "\n[gow2-padcap]   blk1f9:");
+                    for (uint32_t o = 0x1F90u; o < 0x1FD0u; o += 4u)
+                        std::fprintf(stderr, " %08x", wd(a0 + o));
+                    std::fprintf(stderr, "\n");
+                }
+            }
+        }
+        uint32_t preA0 = 0, preA1 = 0;
+        if (probe->address == 0x0025BA00u)
+        {
+            preA0 = GPR_U32(ctx, 4);
+            preA1 = GPR_U32(ctx, 5);
+        }
+        if (probe->address == 0x0025AAC0u)
+        {
+            // TEMP-DIAG diag106: log every mode-set call (rare) with its argument.
+            std::fprintf(stderr, "[gow2-modeset] #%u mode=%d ra=%08x\n",
+                         probe->calls.load(std::memory_order_relaxed) + 1u,
+                         static_cast<int32_t>(GPR_U32(ctx, 4)), GPR_U32(ctx, 31));
+        }
+        uint32_t preBtn = 0, preF70 = 0, preF74 = 0;
+        if (probe->address == 0x0025CEC8u)
+        {
+            auto wd3 = [rdram](uint32_t a) { uint32_t v; std::memcpy(&v, rdram + (a & 0x01FFFFFCu), 4); return v; };
+            preBtn = wd3(0x0032F3A8u);
+            preF70 = wd3(0x002D8F70u);
+            preF74 = wd3(0x002D8F74u);
+        }
         probe->original(rdram, ctx, runtime);
+        if (probe->address == 0x001E4CE0u)
+            g_gow2LastLookupObj = GPR_U32(ctx, 2);
+        if (probe->address == 0x0025CEC8u)
+        {
+            // TEMP-DIAG diag112: log every padConsB call in which the cooked
+            // button word or the mode-11 latches change.
+            auto wd3 = [rdram](uint32_t a) { uint32_t v; std::memcpy(&v, rdram + (a & 0x01FFFFFCu), 4); return v; };
+            const uint32_t b = wd3(0x0032F3A8u), f7 = wd3(0x002D8F70u), f4 = wd3(0x002D8F74u),
+                           md = wd3(0x002D8EC0u);
+            if (b != preBtn || f7 != preF70 || f4 != preF74)
+                std::fprintf(stderr, "[gow2-modeedge] btn %08x->%08x f70 %u->%u f74 %u->%u mode=%u\n",
+                             preBtn, b, preF70, f7, preF74, f4, md);
+        }
+        if (probe->address == 0x0025BA00u && (preA0 == 0x0071D288u || preA1 == 0x0071D288u))
+        {
+            // TEMP-DIAG diag104: postReq called on the player object -- what did
+            // it leave in the +0x1FA4 request slot?
+            static uint32_t lastPost = 0xDEADBEEFu;
+            static unsigned printed = 0;
+            auto wd2 = [rdram](uint32_t a) { uint32_t v; std::memcpy(&v, rdram + (a & 0x01FFFFFCu), 4); return v; };
+            const uint32_t slot = wd2(0x0071D288u + 0x1FA4u);
+            if (slot != lastPost || printed < 20u)
+            {
+                lastPost = slot;
+                ++printed;
+                std::fprintf(stderr, "[gow2-postcap] call=%u a0=%08x a1=%08x slot1fa4=%08x\n",
+                             probe->calls.load(std::memory_order_relaxed) + 1u, preA0, preA1, slot);
+            }
+        }
         const uint32_t calls = probe->calls.fetch_add(1u) + 1u;
+        if (probe->countOnly)
+            return;
+        // TEMP-DIAG diag115: GOW2_MOVIE_TRACE_PRINTS=0 suppresses the per-change
+        // [gow2-movie] prints (they flooded the 80 MB log cap in fast regimes);
+        // counting, padcap/modeedge/postcap and watch prints are unaffected.
+        {
+            static const bool quiet = [] { const char *e = std::getenv("GOW2_MOVIE_TRACE_PRINTS"); return e && e[0] == '0'; }();
+            if (quiet)
+                return;
+        }
         const uint32_t v0 = GPR_U32(ctx, 2);
         if (probe->lastV0.exchange(v0) == v0 && calls % 2000u != 0u)
             return;
@@ -260,6 +631,15 @@ namespace
                      game ? static_cast<int32_t>(word(game + 0x5ACu)) : -1, movie, movie ? word(movie + 0x50u) : 0u,
                      movie ? word(movie + 0x54u) : 0u, movie ? word(movie + 0x140u) : 0u, movie ? word(movie + 0x14Cu) : 0u,
                      movie ? word(movie + 0x154u) : 0u);
+    }
+
+    // TEMP-DIAG diag37: print every probe's total call count, one short line
+    // per probe, so the watch thread shows which functions never run at all.
+    void gow2PrintProbeCounts()
+    {
+        for (const Gow2MovieProbe &p : g_gow2MovieProbes)
+            std::fprintf(stderr, "[gow2-watch]   probe %-14s %08x calls=%u\n", p.name, p.address,
+                         p.calls.load(std::memory_order_relaxed));
     }
 
     // El callback del audio de la película (0x1929E0, ver NOTES.md): las primeras entregas, con su longitud, los primeros
@@ -464,16 +844,37 @@ namespace
         gow2PadReturn(ctx, socket ? 1u : 0xFFFFFFFFu);
     }
 
+    // TEMP-DIAG diag40: libpad2 override call counters, printed by the watch
+    // thread, to prove which overrides the guest still calls in this phase.
+    std::atomic<uint64_t> g_padGetStateRet1{0}, g_padGetStateRet0{0}, g_padProfileCalls{0}, g_padReadEntries{0},
+        g_padReadEarly{0};
+    void gow2PrintPadCounts()
+    {
+        std::fprintf(stderr, "[gow2-watch]   padcalls getstate1=%llu getstate0=%llu profile=%llu read=%llu readEarly=%llu\n",
+                     static_cast<unsigned long long>(g_padGetStateRet1.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long long>(g_padGetStateRet0.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long long>(g_padProfileCalls.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long long>(g_padReadEntries.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long long>(g_padReadEarly.load(std::memory_order_relaxed)));
+    }
+
     // 0x2B7C88 scePad2GetState(socket): 1 = estable. Solo el puerto 1 tiene mando (el del PC o el teclado).
     void gow2Pad2GetState(uint8_t *, R5900Context *ctx, PS2Runtime *)
     {
         const Gow2PadSocket *socket = gow2PadSocket(ctx);
-        gow2PadReturn(ctx, socket && socket->port == 0u ? 1u : 0u);
+        const uint32_t ret = socket && socket->port == 0u ? 1u : 0u;
+        const uint64_t n =
+            (ret ? g_padGetStateRet1 : g_padGetStateRet0).fetch_add(1u, std::memory_order_relaxed) + 1u;
+        if (n <= 4u)
+            std::fprintf(stderr, "[gow2-pad2] getstate handle=%u port=%d -> %u\n", GPR_U32(ctx, 4),
+                         socket ? static_cast<int>(socket->port) : -1, ret);
+        gow2PadReturn(ctx, ret);
     }
 
     // 0x2B7BB8 scePad2GetButtonProfile(socket, u8 *profile): 0xFF... = DualShock 2 (todos los botones)
     void gow2Pad2GetButtonProfile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
     {
+        g_padProfileCalls.fetch_add(1u, std::memory_order_relaxed); // TEMP-DIAG diag40
         uint8_t *buffer = gow2PadBuffer(rdram, GPR_U32(ctx, 5), 4);
         const Gow2PadSocket *socket = gow2PadSocket(ctx);
         if (!buffer || !socket || socket->port != 0u)
@@ -547,6 +948,11 @@ namespace
         if (!text)
             return 0u;
         static const std::vector<Gow2PadPress> presses = gow2ParsePadScript(text);
+        static const bool diag41Logged = [] {
+            std::fprintf(stderr, "[gow2-pad2] TEMP-DIAG diag41 script text='%s' presses=%zu\n", text, presses.size());
+            return true;
+        }();
+        (void)diag41Logged;
         static const auto start = std::chrono::steady_clock::now();
         const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         constexpr double kHold = 0.3;
@@ -566,6 +972,59 @@ namespace
             std::fprintf(stderr, "[gow2-pad2:script] t=%.1f s botones=%05x\n", now, pressed);
         last = pressed;
         return pressed;
+    }
+
+    // TEMP-DIAG probe of the loader's SMPD-status poll (0x17F170): counts, in
+    // 10 s buckets, how many request entries the walk examines and how many
+    // carry state 2 ([req+0x38]==2), so a device run shows whether the
+    // post-movie load wait is spinning over a state-2 request or over an
+    // empty list. Written from the recompiled code: entry =
+    // *(u32*)(rdram + 0x32F270); walk: node = *(u32*)(entry + 4) repeated;
+    // state at +0x38; the walk ends when the +4 link is 0.
+    std::atomic<uint64_t> g_loaderPollEntries{0};
+    std::atomic<uint64_t> g_loaderPollState2{0};
+    std::atomic<uint64_t> g_loaderPollCalls{0};
+    void gow2LoaderPollProbe(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t entry = 0;
+        std::memcpy(&entry, rdram + 0x32F270u, sizeof(entry));
+        uint64_t entries = 0, state2 = 0;
+        for (uint32_t node = entry; node != 0u && entries < 4096u;)
+        {
+            uint32_t state = 0, next = 0;
+            std::memcpy(&state, rdram + ((node + 0x38u) & 0x01FFFFFFu), sizeof(state));
+            std::memcpy(&next, rdram + ((node + 4u) & 0x01FFFFFFu), sizeof(next));
+            ++entries;
+            if (state == 2u)
+                ++state2;
+            if (next == node)
+                break;
+            node = next;
+        }
+        g_loaderPollEntries.fetch_add(entries, std::memory_order_relaxed);
+        g_loaderPollState2.fetch_add(state2, std::memory_order_relaxed);
+        g_loaderPollCalls.fetch_add(1u, std::memory_order_relaxed);
+        // TEMP-DIAG diag96: spawn the printer exactly once. The previous
+        // 0-transition test respawned an immortal thread after every 10 s
+        // counter reset, leaking threads for the whole run.
+        static std::atomic<bool> g_loaderPollPrinterSpawned{false};
+        if (!g_loaderPollPrinterSpawned.exchange(true, std::memory_order_relaxed))
+        {
+            std::thread([] {
+                for (;;)
+                {
+                    std::this_thread::sleep_for(std::chrono::seconds(10));
+                    std::fprintf(stderr, "[gow2-loadpoll] calls=%llu entries=%llu state2=%llu\n",
+                                 static_cast<unsigned long long>(g_loaderPollCalls.load(std::memory_order_relaxed)),
+                                 static_cast<unsigned long long>(g_loaderPollEntries.load(std::memory_order_relaxed)),
+                                 static_cast<unsigned long long>(g_loaderPollState2.load(std::memory_order_relaxed)));
+                    g_loaderPollCalls.store(0u, std::memory_order_relaxed);
+                    g_loaderPollEntries.store(0u, std::memory_order_relaxed);
+                    g_loaderPollState2.store(0u, std::memory_order_relaxed);
+                }
+            }).detach();
+        }
+        FUN_0017f170_0x17f170(rdram, ctx, runtime);
     }
 
     // 0x2B7AE0 scePad2Read(socket, u8 *data): 18 bytes = botones (activos a 0, orden del cable), RX/RY/LX/LY y las 12
@@ -589,11 +1048,13 @@ namespace
             std::memcpy(rdram + address, &aspect, sizeof(aspect));
         }
 
+        g_padReadEntries.fetch_add(1u, std::memory_order_relaxed); // TEMP-DIAG diag40
         uint8_t *buffer = gow2PadBuffer(rdram, GPR_U32(ctx, 5), 18);
         const Gow2PadSocket *socket = gow2PadSocket(ctx);
         uint8_t state[32]{};
         if (!buffer || !socket || socket->port != 0u || !runtime || !runtime->padBackend().readState(0, 0, state, sizeof(state)))
         {
+            g_padReadEarly.fetch_add(1u, std::memory_order_relaxed); // TEMP-DIAG diag40
             gow2PadReturn(ctx, 0xFFFFFFFFu);
             return;
         }
@@ -662,6 +1123,18 @@ namespace
                          runtime.replaceFunction(0x002B7BB8u, gow2Pad2GetButtonProfile) &&
                          runtime.replaceFunction(0x002B7C88u, gow2Pad2GetState);
         std::fprintf(stderr, "[gow2-override] libpad2=%d\n", pad);
+        const bool loadPoll = runtime.replaceFunction(0x0017F170u, gow2LoaderPollProbe); // TEMP-DIAG: loader poll probe
+        std::fprintf(stderr, "[gow2-override] loadPollProbe=%d\n", loadPoll);
+        // TEMP-DIAG: count FlushCache syscalls (0x2CFBA0, libee _FlushCache):
+        // the post-movie phase calls it in a tight loop from the SIF RPC
+        // completion wait (0x2A7FA0); the 10 s deltas printed by the watch
+        // thread show whether the guest is still spinning there or moved on.
+        runtime.replaceFunction(0x002CFBA0u, [](uint8_t *, R5900Context *ctx, PS2Runtime *) {
+            g_flushCacheCount.fetch_add(1u, std::memory_order_relaxed);
+            SET_GPR_S32(ctx, 2, 0);
+            ctx->pc = GPR_U32(ctx, 31);
+        });
+        std::fprintf(stderr, "[gow2-override] flushProbe installed\n");
         const bool ipu = runtime.replaceFunction(0x002B56F0u, gow2IpuInit); // sceIpuInit (bloqueo 11)
         const bool movieIdle = runtime.replaceFunction(0x00190A08u, gow2MovieIdle); // espera de los vídeos
         std::fprintf(stderr, "[gow2-override] sceIpuInit=%d movieIdle=%d\n", ipu, movieIdle);

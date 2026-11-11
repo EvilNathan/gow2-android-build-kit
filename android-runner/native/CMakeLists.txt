@@ -115,6 +115,13 @@ if(ANDROID)
             message(FATAL_ERROR "gs_vk: no SPIR-V files compiled and no prebuilt shaders found!")
         endif()
 
+        # Shaders are compiled and embedded at configure time (above), so
+        # register them as configure dependencies: editing a .vert/.frag
+        # must re-run this configure step on the next build, otherwise the
+        # stale SPIR-V from the first configure keeps being embedded.
+        file(GLOB gow2_shader_sources "${GOW2_GS_VK_DIR}/shaders/*.vert" "${GOW2_GS_VK_DIR}/shaders/*.frag")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${gow2_shader_sources})
+
         include("${GOW2_GS_VK_DIR}/sources.cmake")
         if(TARGET ps2_runtime)
             target_sources(ps2_runtime PRIVATE "${GOW2_SHADER_CPP}")
@@ -146,7 +153,25 @@ target_include_directories(ps2_runtime PRIVATE
     if(PS2X_ANDROID_NATIVE_VU1_DIR)
         file(GLOB GOW2_VU1N_PARTS CONFIGURE_DEPENDS "${PS2X_ANDROID_NATIVE_VU1_DIR}/*.cpp")
         if(GOW2_VU1N_PARTS AND TARGET ps2EntryRunner)
-            target_sources(ps2EntryRunner PRIVATE ${GOW2_VU1N_PARTS})
+            # Every part defines the same file-scope registration symbols
+            # (g_registered), so the parts must never be merged into the
+            # runner's unity TUs. Source-file properties set from this
+            # directory do not reach the engine's target scope, so build the
+            # parts as a standalone object library in this scope instead and
+            # link the objects in. (The engine marks its own generated parts
+            # SKIP_UNITY_BUILD_INCLUSION for the same reason.)
+            add_library(gow2_vu1n OBJECT ${GOW2_VU1N_PARTS})
+            set_target_properties(gow2_vu1n PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+            target_include_directories(gow2_vu1n PRIVATE
+                "${GOW2_REPO_DIR}/PS2Recomp/ps2xRuntime/include"
+                "${GOW2_REPO_DIR}/compat/arm64"
+                # compat/arm64/immintrin.h wraps sse2neon.h; the engine adds
+                # this FetchContent dir with a directory-level include in its
+                # own scope, which does not reach this directory.
+                "${CMAKE_BINARY_DIR}/_deps/sse2neon-src")
+            target_compile_definitions(gow2_vu1n PRIVATE USE_SSE2NEON)
+            target_compile_options(gow2_vu1n PRIVATE -march=armv8-a+fp+simd)
+            target_sources(ps2EntryRunner PRIVATE $<TARGET_OBJECTS:gow2_vu1n>)
             target_include_directories(ps2EntryRunner PRIVATE "${GOW2_REPO_DIR}/PS2Recomp/ps2xRuntime/include")
             message(STATUS "native VU1: ${GOW2_VU1N_PARTS}")
         else()

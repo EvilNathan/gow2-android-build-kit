@@ -15,8 +15,19 @@ layout(set = 0, binding = 1) uniform PresentUbo
 
 void main()
 {
-    ivec2 p = max(ivec2(gl_FragCoord.xy) + uSrcOffset.xy, ivec2(uSrcEdge.x));
     ivec2 size = textureSize(uSrc, 0);
+    ivec2 fc = ivec2(gl_FragCoord.xy);
+    // uSrcEdge.y: 1 = the present image is the composition pre-rotated
+    // 90 degrees CW (the surface declares ROTATE_90, so the compositor
+    // rotates the buffer CCW on display and the image lands upright);
+    // 2 = pre-rotated 90 degrees CCW. The fetch maps the output pixel
+    // back into source space before the DBX/DBY offset is applied.
+    ivec2 q = fc;
+    if (uSrcEdge.y == 1)
+        q = ivec2(fc.y, size.y - 1 - fc.x);
+    else if (uSrcEdge.y == 2)
+        q = ivec2(size.x - 1 - fc.y, fc.x);
+    ivec2 p = max(q + uSrcOffset.xy, ivec2(uSrcEdge.x));
     vec4 c = (p.x < size.x && p.y < size.y) ? texelFetch(uSrc, p, 0) : vec4(0.0);
     float a = (uSrcOffset.z != 0) ? 128.0 / 255.0 : c.a;
     oColor = vec4(c.rgb, (uSrcOffset.w != 0) ? min(1.0, a * 2.0) : a);

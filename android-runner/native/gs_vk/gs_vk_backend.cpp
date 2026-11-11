@@ -20,6 +20,7 @@
 #include "gs_vk_shaders_generated.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -266,6 +267,8 @@ struct GSVkBackend::Impl
     VkDescriptorSetLayout drawSetLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout presentSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool descPool = VK_NULL_HANDLE;
+    uint32_t descSetsUsed = 0;   // sets allocated since the last pool reset (in submitAndWait)
+    uint32_t circuitSkips = 0;   // present circuits skipped on mid-pass allocation failure
     VkPipelineLayout drawPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout presentPipelineLayout = VK_NULL_HANDLE;
 
@@ -384,6 +387,16 @@ struct GSVkBackend::Impl
     uint8_t *vram = nullptr;
     uint32_t vramSize = 0;
     bool initialized = false, failed = false, dualSrc = false;
+    // The engine enters this backend from more than one thread (the GS
+    // thread for draws/presents, the runtime thread for VRAM reads and
+    // CLUT-from-target readbacks), but all GPU work shares ONE command
+    // buffer and ONE fence. Unsynchronised entry lets two threads record
+    // into / reset the same cb concurrently, which intermittently wedges
+    // the GPU on Mali: a submitted batch never completes and the fence
+    // wait times out. Every public entry point takes this lock; it is
+    // recursive because public entries reach submitAndWait() and the
+    // readback paths through several internal layers.
+    mutable std::recursive_mutex apiMutex;
 
     std::vector<HwVertex> pending;
     GSDrawState pendingState{};
@@ -417,6 +430,7 @@ struct GSVkBackend::Impl
         VkSemaphore rendered = VK_NULL_HANDLE;  // binary, blit done
         uint32_t width = 0, height = 0;
         VkFormat format = VK_FORMAT_UNDEFINED;
+        VkSurfaceTransformFlagBitsKHR transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         bool ok = false;
         bool needsRecreate = false;
         bool canBlit = false;
@@ -429,6 +443,8 @@ struct GSVkBackend::Impl
     VkImageView presentView = VK_NULL_HANDLE;
     VkFramebuffer presentFb = VK_NULL_HANDLE;
     uint32_t presentW = 0, presentH = 0;
+    int presentRotate = 0; // 0 = none, 1 = pre-rotate 90 CW in the present shader (surface ROTATE_90)
+    int presentMode = -1;  // experiment selector from /sdcard/gow2/present_mode.txt (see ensureSwapchain)
     VkBuffer readbackBuffer = VK_NULL_HANDLE;
     VkDeviceMemory readbackMem = VK_NULL_HANDLE;
     uint8_t *readbackMapped = nullptr;
@@ -449,6 +465,19 @@ struct GSVkBackend::Impl
     // in submitAndWait. If a submission wedges, the last printed composition
     // before the "GPU stall" line identifies its contents.
     uint64_t submitSerial = 0;
+    // TEMP-DIAG gs-stats: per-window draw classification, printed every ~5 s from draw()
+    uint64_t stDraws = 0, stVerts = 0, stMasked = 0, stTiny = 0, stCopy = 0, stTex = 0;
+    uint64_t stTexNs = 0, stRecNs = 0, stDate = 0;
+    struct SawStat { const char *tag; uint64_t ns; uint64_t n; };
+    SawStat stSaw[20] = {};
+    uint32_t stSawCount = 0;
+    uint64_t stEntSubmitNs = 0, stEntSubmitN = 0, stEntFlushNs = 0, stEntFlushN = 0, stEntPresentNs = 0, stEntPresentN = 0;
+    uint64_t stPresAcqNs = 0, stPresAcqMaxNs = 0;
+    // TEMP-DIAG diag118: swapchain image index + QueuePresent result census.
+    uint64_t stPresIdx[8] = {};
+    uint64_t stPresResOk = 0, stPresResSub = 0, stPresResOod = 0, stPresResOther = 0, stPresNoImg = 0;
+    uint64_t stShufCand = 0, stShufOk = 0, stShufRej[8] = {};
+    std::chrono::steady_clock::time_point stLast{};
     std::vector<std::string> submitEvents;
     uint32_t submitEventsDropped = 0;
     uint32_t submitSummariesPrinted = 0;
@@ -461,7 +490,7 @@ struct GSVkBackend::Impl
     // command buffer helpers
     void beginFrameCb();
     void endFrameCb();
-    void submitAndWait();
+    void submitAndWait(const char *from);
 
     VkPipeline pipeline(const PipelineKey &key);
     VkPipeline buildPipeline(const PipelineKey &key);
@@ -538,6 +567,7 @@ GSVkBackend::~GSVkBackend() = default;
 
 void GSVkBackend::Initialize(uint8_t *vram, uint32_t vramSize)
 {
+    std::lock_guard<std::recursive_mutex> apiLock(m_impl->apiMutex);
     m_impl->vram = vram;
     m_impl->vramSize = vramSize;
     m_impl->store.Initialize(vram, vramSize);
@@ -547,6 +577,7 @@ void GSVkBackend::Initialize(uint8_t *vram, uint32_t vramSize)
 void GSVkBackend::Reset()
 {
     Impl &d = *m_impl;
+    std::lock_guard<std::recursive_mutex> apiLock(d.apiMutex);
     if (d.failed)
         return;
     d.flushPending();
@@ -561,6 +592,7 @@ void GSVkBackend::Reset()
 void GSVkBackend::Submit(const GSPrimitiveBatch &batch)
 {
     Impl &d = *m_impl;
+    std::lock_guard<std::recursive_mutex> apiLock(d.apiMutex);
     if (batch.vertexCount == 0u || d.failed)
         return;
     if (!d.ensure())
@@ -571,6 +603,7 @@ void GSVkBackend::Submit(const GSPrimitiveBatch &batch)
 void GSVkBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 {
     Impl &d = *m_impl;
+    std::lock_guard<std::recursive_mutex> apiLock(d.apiMutex);
     if (d.failed)
         return;
     d.flushPending();
@@ -585,6 +618,7 @@ void GSVkBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 void GSVkBackend::BeginTransfer(const GSTransferCommand &command)
 {
     Impl &d = *m_impl;
+    std::lock_guard<std::recursive_mutex> apiLock(d.apiMutex);
     if (d.failed)
         return;
     d.flushPending();
@@ -603,6 +637,7 @@ void GSVkBackend::BeginTransfer(const GSTransferCommand &command)
 void GSVkBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 {
     Impl &d = *m_impl;
+    std::lock_guard<std::recursive_mutex> apiLock(d.apiMutex);
     if (d.failed)
         return;
     d.store.Upload(data, sizeBytes);
@@ -610,18 +645,21 @@ void GSVkBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 
 void GSVkBackend::Flush()
 {
+    std::lock_guard<std::recursive_mutex> apiLock(m_impl->apiMutex);
     if (!m_impl->failed)
         m_impl->flushPending();
 }
 
 void GSVkBackend::TextureFlush()
 {
+    std::lock_guard<std::recursive_mutex> apiLock(m_impl->apiMutex);
     if (!m_impl->failed)
         m_impl->flushPending();
 }
 
 void GSVkBackend::Sync(GSSyncReason)
 {
+    std::lock_guard<std::recursive_mutex> apiLock(m_impl->apiMutex);
     if (!m_impl->failed)
         m_impl->flushPending();
 }
@@ -629,6 +667,7 @@ void GSVkBackend::Sync(GSSyncReason)
 bool GSVkBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
 {
     Impl &d = *m_impl;
+    std::lock_guard<std::recursive_mutex> apiLock(d.apiMutex);
     if (d.failed || !d.ensure() || context.frame.fbw == 0u)
         return false;
     d.flushPending();
@@ -652,33 +691,38 @@ bool GSVkBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
     gs_vk::vk.CmdBeginRenderPass(d.frameCb, &rb, VK_SUBPASS_CONTENTS_INLINE);
     gs_vk::vk.CmdEndRenderPass(d.frameCb);
     d.endFrameCb();
-    d.submitAndWait();
+    d.submitAndWait("clearfb");
     ++rt.version;
     return true;
 }
 
 uint32_t GSVkBackend::ConsumeLocalToHostBytes(uint8_t *, uint32_t)
 {
+    std::lock_guard<std::recursive_mutex> apiLock(m_impl->apiMutex);
     return 0u; // the game never reads GS memory back
 }
 
 uint32_t GSVkBackend::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
 {
+    std::lock_guard<std::recursive_mutex> apiLock(m_impl->apiMutex);
     return m_impl->store.Read(psm, base, bw, x, y);
 }
 
 void GSVkBackend::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
 {
+    std::lock_guard<std::recursive_mutex> apiLock(m_impl->apiMutex);
     m_impl->store.Write(psm, base, bw, x, y, value);
 }
 
 void GSVkBackend::SnapshotVram(std::vector<uint8_t> &out) const
 {
+    std::lock_guard<std::recursive_mutex> apiLock(m_impl->apiMutex);
     m_impl->store.Snapshot(out);
 }
 
 GSTransferSnapshot GSVkBackend::GetTransferSnapshot() const
 {
+    std::lock_guard<std::recursive_mutex> apiLock(m_impl->apiMutex);
     return m_impl->store.TransferState();
 }
 
@@ -708,8 +752,13 @@ void GSVkBackend::Impl::stallGpu(const char *where, VkResult res)
         std::fprintf(stderr, "[gs-vk] GPU error at %s: VkResult %d — disabling Vulkan backend; game logic continues\n", where, static_cast<int>(res));
         ps2x::host::Log("E/host/gs-vk", "GPU error at %s: VkResult %d — Vulkan backend disabled, game logic continues", where, static_cast<int>(res));
     }
-    if (res == VK_ERROR_DEVICE_LOST)
-        failed = true;
+    // Any wait failure that reaches this point means a submission did not
+    // complete even after the extended retry (timeout) or the device is gone
+    // (device lost). The in-flight command buffer may still be executing, so
+    // the backend must disable itself completely: re-submitting that buffer,
+    // resetting its fence, or freeing its resources is undefined behaviour
+    // and crashed the host on device (SIGSEGV after two timed-out waits).
+    failed = true;
 }
 
 bool GSVkBackend::Impl::waitFrameFence(const char *where, uint64_t timeoutNs)
@@ -725,14 +774,11 @@ bool GSVkBackend::Impl::waitFrameFence(const char *where, uint64_t timeoutNs)
     }
     if (res != VK_SUCCESS)
     {
-        if (res == VK_ERROR_DEVICE_LOST)
-        {
-            stallGpu(where, res);
-        }
-        else
-        {
-            ps2x::host::Log("E/host/gs-vk", "Fence wait failed at %s with VkResult %d (non-fatal, continuing)", where, static_cast<int>(res));
-        }
+        // Timeout after the extended retry is just as unrecoverable as
+        // device-lost: the submission is still in flight. Disable the
+        // backend (stallGpu sets failed) instead of "continuing" with a
+        // pending command buffer.
+        stallGpu(where, res);
         return false;
     }
     return true;
@@ -758,7 +804,7 @@ void GSVkBackend::Impl::logSubmitSummary(const char *tag, uint64_t serial)
         summary += " | (+" + std::to_string(submitEventsDropped) + " more)";
     submitEvents.clear();
     submitEventsDropped = 0;
-    if (submitSummariesPrinted < 600u)
+    if (submitSummariesPrinted < 100000u)
     {
         ++submitSummariesPrinted;
         ps2x::host::Log("host/gs-vk", "%s #%llu:%s", tag, static_cast<unsigned long long>(serial), summary.c_str());
@@ -1297,7 +1343,7 @@ vi.image = tableImage;
         bar2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         gs_vk::vk.CmdPipelineBarrier(frameCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar2);
         endFrameCb();
-        submitAndWait();
+        submitAndWait("devobj");
     }
 
     // present readback buffer (a 4032-px-wide target at 512 rows is the worst case)
@@ -1405,10 +1451,12 @@ VkShaderModule GSVkBackend::Impl::shader(const char *name)
 
 void GSVkBackend::Impl::beginFrameCb()
 {
+    if (failed)
+        return;
     if (cbState == CbState::Recording)
         return;
     if (cbState == CbState::Executable)
-        submitAndWait();
+        submitAndWait("begincb");
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     gs_vk::vk.BeginCommandBuffer(frameCb, &bi);
@@ -1425,8 +1473,29 @@ void GSVkBackend::Impl::endFrameCb()
     cbOpen = false;
 }
 
-void GSVkBackend::Impl::submitAndWait()
+void GSVkBackend::Impl::submitAndWait(const char *from)
 {
+    const auto sawT0 = std::chrono::steady_clock::now(); // TEMP-DIAG gs-stats
+    struct SawGuard
+    {
+        Impl *self; const char *from; std::chrono::steady_clock::time_point t0;
+        ~SawGuard()
+        {
+            const uint64_t ns = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+            for (uint32_t i = 0; i < self->stSawCount; ++i)
+                if (self->stSaw[i].tag == from || std::strcmp(self->stSaw[i].tag, from) == 0)
+                {
+                    self->stSaw[i].ns += ns; ++self->stSaw[i].n; return;
+                }
+            if (self->stSawCount < 20u)
+            {
+                self->stSaw[self->stSawCount] = {from, ns, 1};
+                ++self->stSawCount;
+            }
+        }
+    } sawGuard{this, from, sawT0};
+    if (failed)
+        return;
     if (cbState == CbState::Recording)
         endFrameCb();
 
@@ -1439,7 +1508,7 @@ void GSVkBackend::Impl::submitAndWait()
         logSubmitSummary("submit", submitSerial);
         gs_vk::vk.ResetFences(device, 1, &frameFence);
         gs_vk::vk.QueueSubmit(queue, 1, &su, frameFence);
-        if (!waitFrameFence("submitAndWait"))
+        if (!waitFrameFence(from))
         {
             // The submission never completed: do not reset a command buffer
             // that may still be executing. The backend is disabled now.
@@ -1455,10 +1524,11 @@ void GSVkBackend::Impl::submitAndWait()
     {
         // Bounded idle wait (was an unbounded QueueWaitIdle): if the queue is
         // wedged the backend disables itself instead of blocking forever.
-        waitFrameFence("submitAndWait-idle");
+        waitFrameFence(from);
     }
     if (descPool && gs_vk::vk.ResetDescriptorPool)
         gs_vk::vk.ResetDescriptorPool(device, descPool, 0);
+    descSetsUsed = 0;
     rings.reset();
     emptyTrash();
 }
@@ -1637,7 +1707,7 @@ GSVkBackend::Impl::RenderTarget &GSVkBackend::Impl::target(uint32_t fbp, uint32_
     for (const auto &t : targets)
         if (t && t->fbp == fbp)
         {
-            submitAndWait();
+            submitAndWait("target-resize");
             destroyTarget(*t);
             createTarget(*t, fbp, fbw);
             return *t;
@@ -1744,7 +1814,7 @@ void GSVkBackend::Impl::createTarget(RenderTarget &t, uint32_t fbp, uint32_t fbw
     gs_vk::vk.CmdEndRenderPass(frameCb);
     t.depthCleared = true;
     endFrameCb();
-    submitAndWait();
+    submitAndWait("create-target");
     ps2x::host::Log("host/gs-vk", "Render target fbp=%u fbw=%u -> %ux%u", fbp, t.fbw, t.pxW, t.pxH);
 }
 
@@ -1798,7 +1868,7 @@ GSVkBackend::Impl::Texture &GSVkBackend::Impl::uploadTexture(uint64_t key, uint3
     auto a = staging.alloc(bytes, 16);
     if (!a.cpu)
     {
-        submitAndWait();
+        submitAndWait("destroy-target");
         staging.reset();
         a = staging.alloc(bytes, 16);
         if (!a.cpu)
@@ -2003,7 +2073,7 @@ bool GSVkBackend::Impl::readTargetCpu(RenderTarget &rt)
         rt.cpu.resize(static_cast<size_t>(rt.pxW) * rt.pxH * 4u);
     // pending draws may still be open: submit them so the image holds the picture
     flushPending();
-    submitAndWait();
+    submitAndWait("readback");
     beginFrameCb();
     VkBufferImageCopy cp{};
     cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -2119,6 +2189,8 @@ void GSVkBackend::Impl::addVertex(const GSDrawState &s, const GSVertex &v, float
 
 void GSVkBackend::Impl::submit(const GSPrimitiveBatch &b)
 {
+    const auto entT0 = std::chrono::steady_clock::now(); // TEMP-DIAG gs-stats
+    struct EntGuard { Impl *self; std::chrono::steady_clock::time_point t0; ~EntGuard() { self->stEntSubmitNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(); ++self->stEntSubmitN; } } entGuard{this, entT0};
     const GSDrawState &s = b.state;
     const GSPrimType type = s.prim.type;
     const bool tri = type == GS_PRIM_TRIANGLE || type == GS_PRIM_TRISTRIP || type == GS_PRIM_TRIFAN;
@@ -2459,6 +2531,8 @@ bool GSVkBackend::Impl::depthClearSprite(const GSDrawState &s, const GSPrimitive
 
 void GSVkBackend::Impl::flushPending()
 {
+    const auto entT0 = std::chrono::steady_clock::now(); // TEMP-DIAG gs-stats
+    struct EntGuard { Impl *self; std::chrono::steady_clock::time_point t0; ~EntGuard() { self->stEntFlushNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(); ++self->stEntFlushN; } } entGuard{this, entT0};
     ++batchSerial;
     flushShuffle();
     if (!havePending || pending.empty())
@@ -2483,13 +2557,70 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
     RenderTarget &rt = target(c.frame.fbp, c.frame.fbw);
     if (failed)
         return;
+    const auto stT0 = std::chrono::steady_clock::now(); // TEMP-DIAG gs-stats
+    long long stSegA = 0;
+    { // TEMP-DIAG gs-stats
+        ++stDraws;
+        stVerts += verts.size();
+        if (c.frame.fbmsk != 0u)
+            ++stMasked;
+        if (verts.size() <= 6u)
+            ++stTiny;
+        if (c.frame.fbmsk == 0x3fffu && c.frame.psm == 2u && verts.size() <= 6u)
+            ++stCopy;
+        if (s.prim.tme)
+            ++stTex;
+        if (((c.test >> 14) & 1u) != 0u && c.frame.psm != GS_PSM_CT24)
+            ++stDate;
+        const auto now = stT0;
+        if (stLast.time_since_epoch().count() == 0)
+            stLast = now;
+        else if (now - stLast >= std::chrono::seconds(5))
+        {
+            ps2x::host::Log("host/gs-vk", "[gs-stats] draws=%llu verts=%llu masked=%llu tiny=%llu copy3fff=%llu tex=%llu date=%llu texMs=%llu recMs=%llu",
+                            (unsigned long long)stDraws, (unsigned long long)stVerts, (unsigned long long)stMasked,
+                            (unsigned long long)stTiny, (unsigned long long)stCopy, (unsigned long long)stTex,
+                            (unsigned long long)stDate, (unsigned long long)(stTexNs / 1000000u), (unsigned long long)(stRecNs / 1000000u));
+            stDraws = stVerts = stMasked = stTiny = stCopy = stTex = 0;
+            stDate = 0; stTexNs = 0; stRecNs = 0;
+            for (uint32_t i = 0; i < stSawCount; ++i)
+            {
+                ps2x::host::Log("host/gs-vk", "[gs-saw] tag=%s n=%llu ms=%llu", stSaw[i].tag,
+                                (unsigned long long)stSaw[i].n, (unsigned long long)(stSaw[i].ns / 1000000u));
+                stSaw[i].ns = 0; stSaw[i].n = 0;
+            }
+            ps2x::host::Log("host/gs-vk", "[gs-ent] submit n=%llu ms=%llu flush n=%llu ms=%llu present n=%llu ms=%llu acqMs=%llu acqMaxMs=%llu",
+                            (unsigned long long)stEntSubmitN, (unsigned long long)(stEntSubmitNs / 1000000u),
+                            (unsigned long long)stEntFlushN, (unsigned long long)(stEntFlushNs / 1000000u),
+                            (unsigned long long)stEntPresentN, (unsigned long long)(stEntPresentNs / 1000000u),
+                            (unsigned long long)(stPresAcqNs / 1000000u), (unsigned long long)(stPresAcqMaxNs / 1000000u));
+            stEntSubmitNs = stEntSubmitN = stEntFlushNs = stEntFlushN = stEntPresentNs = stEntPresentN = 0;
+            stPresAcqNs = 0; stPresAcqMaxNs = 0;
+            // TEMP-DIAG diag118
+            ps2x::host::Log("host/gs-vk", "[gs-pres] idx=%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu ok=%llu sub=%llu ood=%llu other=%llu noimg=%llu",
+                            (unsigned long long)stPresIdx[0], (unsigned long long)stPresIdx[1], (unsigned long long)stPresIdx[2], (unsigned long long)stPresIdx[3],
+                            (unsigned long long)stPresIdx[4], (unsigned long long)stPresIdx[5], (unsigned long long)stPresIdx[6], (unsigned long long)stPresIdx[7],
+                            (unsigned long long)stPresResOk, (unsigned long long)stPresResSub, (unsigned long long)stPresResOod,
+                            (unsigned long long)stPresResOther, (unsigned long long)stPresNoImg);
+            for (int i = 0; i < 8; ++i) stPresIdx[i] = 0;
+            stPresResOk = stPresResSub = stPresResOod = stPresResOther = stPresNoImg = 0;
+            ps2x::host::Log("host/gs-vk", "[gs-shuf] cand=%llu ok=%llu rej=%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu",
+                            (unsigned long long)stShufCand, (unsigned long long)stShufOk,
+                            (unsigned long long)stShufRej[0], (unsigned long long)stShufRej[1], (unsigned long long)stShufRej[2], (unsigned long long)stShufRej[3],
+                            (unsigned long long)stShufRej[4], (unsigned long long)stShufRej[5], (unsigned long long)stShufRej[6], (unsigned long long)stShufRej[7]);
+            stShufCand = 0; stShufOk = 0;
+            for (int i = 0; i < 8; ++i) stShufRej[i] = 0;
+            stLast = now;
+        }
+    }
     {
-        char ev[192];
-        std::snprintf(ev, sizeof(ev), "draw prim=%d tme=%d abe=%d verts=%zu fbp=%u fbw=%u fpsm=%u zbp=%u tbp=%u tpsm=%u twh=%ux%u",
+        char ev[224];
+        std::snprintf(ev, sizeof(ev), "draw prim=%d tme=%d abe=%d verts=%zu fbp=%u fbw=%u fpsm=%u zbp=%u tbp=%u tpsm=%u twh=%ux%u fbmsk=%08x", // TEMP-DIAG diag34: fbmsk in draw summary
                       static_cast<int>(s.prim.type), s.prim.tme ? 1 : 0, s.prim.abe ? 1 : 0, verts.size(),
                       c.frame.fbp, c.frame.fbw, static_cast<unsigned>(c.frame.psm), c.zbuf.zbp,
                       c.tex0.tbp0, static_cast<unsigned>(c.tex0.psm),
-                      static_cast<unsigned>(s.textureWidth), static_cast<unsigned>(s.textureHeight));
+                      static_cast<unsigned>(s.textureWidth), static_cast<unsigned>(s.textureHeight),
+                      static_cast<unsigned>(c.frame.fbmsk));
         noteSubmitEvent(ev);
     }
     rt.psm = c.frame.psm;
@@ -2620,7 +2751,12 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
                 for (const auto &o : targets)
                     if (o && o.get() != candidate && o->zbp != ~0u && o->zbp == candidate->fbp && o->lastDepthSeq > candidate->lastDrawSeq)
                         depthOver = true;
-                if (family(candidate->psm) == family(c.tex0.psm) && !since && !depthOver)
+                // TEMP-DIAG diag80: RT images are stored on the CT32 grid (createTarget
+                // psm=0, pxW=fbw*64), so a CT32/CT24 texture read is the identity
+                // interpretation even when rt.psm was last overwritten by a 16-bit
+                // view draw. Without this, the scene->display copy falls into the
+                // reinterpret path with the wrong inverse table and scrambles.
+                if ((family(candidate->psm) == family(c.tex0.psm) || family(c.tex0.psm) == 32) && !since && !depthOver)
                     src = candidate;
             }
         const bool zFormat = c.tex0.psm == 0x30 || c.tex0.psm == 0x31 || c.tex0.psm == 0x32 || c.tex0.psm == 0x3A;
@@ -2757,6 +2893,8 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
     u.uAref = static_cast<int32_t>(aref);
     u.uPass = ate ? 1 : 0;
 
+    stSegA = (long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - stT0).count(); // TEMP-DIAG
+    stTexNs += (uint64_t)stSegA;
     // vertices + UBO in the ring, and descriptor set allocation
     const VkDeviceSize vbytes = dverts.size() * sizeof(HwVertex);
     auto valloc = rings.alloc(vbytes, 16);
@@ -2769,7 +2907,7 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
     VkResult dscRes = gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc);
     if (!valloc.cpu || !ubo.cpu || dscRes != VK_SUCCESS)
     {
-        submitAndWait();
+        submitAndWait("draw");
         beginFrameCb();
         valloc = rings.alloc(vbytes, 16);
         ubo = rings.alloc(sizeof(DrawUbo), 256);
@@ -2778,6 +2916,7 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
         if (!valloc.cpu || !ubo.cpu || !dsc)
             return;
     }
+    ++descSetsUsed;
     std::memcpy(valloc.cpu, dverts.data(), vbytes);
     std::memcpy(ubo.cpu, &u, sizeof(u));
 
@@ -2885,6 +3024,8 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
         auto ubo2 = rings.alloc(sizeof(DrawUbo), 256);
         VkDescriptorSet dsc2 = VK_NULL_HANDLE;
         VkResult dsc2Res = gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc2);
+        if (dsc2Res == VK_SUCCESS)
+            ++descSetsUsed;
         if (ubo2.cpu && dsc2Res == VK_SUCCESS)
         {
             DrawUbo u2 = u;
@@ -2922,6 +3063,7 @@ void GSVkBackend::Impl::draw(const GSDrawState &s, const std::vector<HwVertex> &
             gs_vk::vk.CmdEndRenderPass(frameCb);
         }
     }
+    stRecNs += (uint64_t)((long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - stT0).count() - stSegA); // TEMP-DIAG
     // (render pass → later work ordering is provided by the draw pass's external-out dependency)
 }
 
@@ -2983,15 +3125,33 @@ bool GSVkBackend::Impl::tryShuffle(const GSDrawState &s, const GSPrimitiveBatch 
         if (!identity)
             return false;
     }
+    ++stShufCand; // TEMP-DIAG gs-stats
     const uint32_t m16 = fbmsk16(c.frame.fbmsk);
     const uint32_t lowByte = m16 & 0xFFu, highByte = m16 & 0xFF00u;
     if ((lowByte != 0u && lowByte != 0xFFu) || (highByte != 0u && highByte != 0xFF00u) || m16 == 0xFFFFu)
+    {
+        ++stShufRej[0];
         return false;
+    }
     RenderTarget *dst = findTarget(c.frame.fbp);
     if (dst && family16(dst->psm) && dst->usedW != 0u)
-        return false;
+    {
+        // TEMP-DIAG diag76: gate 1 relaxed — every RT image here is a CT32-sized
+        // RGBA8 image and rt.psm is only the last draw's psm; let unitToOwner's
+        // own mapping + bounds checks decide whether the shuffle applies.
+        static int rej1Log = 0;
+        if (rej1Log < 2)
+        {
+            ++rej1Log;
+            ps2x::host::Log("host/gs-vk", "[gs-shuf-rej1-pass] dstpsm=%u dstfbw=%u dstpx=%ux%u framefbw=%u tbp=%u fbmsk=%08x",
+                            dst->psm, dst->fbw, dst->pxW, dst->pxH, c.frame.fbw, c.tex0.tbp0, c.frame.fbmsk);
+        }
+    }
     if ((c.tex0.tbp0 % 32u) != 0u)
+    {
+        ++stShufRej[2];
         return false;
+    }
     RenderTarget *src = nullptr;
     bool srcDepth = false;
     if (zTex)
@@ -3009,16 +3169,30 @@ bool GSVkBackend::Impl::tryShuffle(const GSDrawState &s, const GSPrimitiveBatch 
             }
     if (!src)
         if (RenderTarget *t = findTarget(c.tex0.tbp0 / 32u))
-            if (!family16(t->psm) && t->usedW != 0u)
+            if (t->usedW != 0u) // TEMP-DIAG diag78: was !family16(t->psm) — same psm-overwrite artefact as gate 1; the image is CT32-sized regardless
                 src = t;
     if (!src)
+    {
+        ++stShufRej[3];
+        static int rej3Log = 0; // TEMP-DIAG gs-stats
+        if (rej3Log < 6)
+        {
+            ++rej3Log;
+            ps2x::host::Log("host/gs-vk", "[gs-shuf-rej3] fbp=%u fpsm=%u fbw=%u tbp=%u tbw=%u tpsm=%u fbmsk=%08x verts=%u",
+                            c.frame.fbp, (unsigned)c.frame.psm, c.frame.fbw, c.tex0.tbp0, c.tex0.tbw, (unsigned)c.tex0.psm,
+                            c.frame.fbmsk, (unsigned)b.vertices.size());
+        }
         return false;
+    }
     const GSVertex &a = b.vertices[0], &e = b.vertices[1];
     const float ofx = c.xyoffset.ofx / 16.0f, ofy = c.xyoffset.ofy / 16.0f;
     const float fx0 = std::min(a.x, e.x) - ofx, fx1 = std::max(a.x, e.x) - ofx, fy0 = std::min(a.y, e.y) - ofy, fy1 = std::max(a.y, e.y) - ofy;
     const auto whole = [](float v) { return std::fabs(v - std::round(v)) < 1e-3f && v >= 0.0f; };
     if (!whole(fx0) || !whole(fy0) || fx1 < 0.0f || fy1 < 0.0f)
+    {
+        ++stShufRej[4];
         return false;
+    }
     const int x0 = static_cast<int>(std::lround(fx0)), x1 = static_cast<int>(std::ceil(fx1 - 1e-3f));
     const int y0 = static_cast<int>(std::lround(fy0)), y1 = static_cast<int>(std::ceil(fy1 - 1e-3f));
     const GSVertex &left = (a.x <= e.x) ? a : e;
@@ -3028,10 +3202,16 @@ bool GSVkBackend::Impl::tryShuffle(const GSDrawState &s, const GSPrimitiveBatch 
     const float vSpan = std::fabs(static_cast<float>(a.v) - static_cast<float>(e.v)) / 16.0f;
     if (((x0 | x1 | y0 | y1 | du | dv) & 7) != 0 || x1 <= x0 || y1 <= y0 || std::fabs(uSpan - (fx1 - fx0)) > 1e-2f ||
         std::fabs(vSpan - (fy1 - fy0)) > 1e-2f)
+    {
+        ++stShufRej[5];
         return false;
+    }
     if (x0 + du < 0 || y0 + dv < 0 || x0 < static_cast<int>(c.scissor.x0) || y0 < static_cast<int>(c.scissor.y0) ||
         x1 - 1 > static_cast<int>(c.scissor.x1) || y1 - 1 > static_cast<int>(c.scissor.y1))
+    {
+        ++stShufRej[6];
         return false;
+    }
     if (!dst)
     {
         flushShuffle();
@@ -3048,11 +3228,20 @@ bool GSVkBackend::Impl::tryShuffle(const GSDrawState &s, const GSPrimitiveBatch 
             uint32_t dx, dy, hd, sx, sy, hs;
             if (!unitToOwner(c.frame.psm, c.frame.fbp * 32u, c.frame.fbw, x, y, 0x00u, dst->fbp, dst->fbw, dx, dy, hd) ||
                 !unitToOwner(tpsm, c.tex0.tbp0, c.tex0.tbw, x + du, y + dv, srcOwnerPsm, srcFbp, src->fbw, sx, sy, hs))
+            {
+                ++stShufRej[7];
                 return false;
+            }
             if (dx + 8u > dst->pxW || dy + 8u > dst->pxH || sx + 8u > src->pxW || sy + 8u > src->pxH)
+            {
+                ++stShufRej[7];
                 return false;
+            }
             if (src == dst && !srcDepth && (sx != dx || sy != dy))
+            {
+                ++stShufRej[7];
                 return false; // would read texels that other quads of the pass write
+            }
             const float ox = static_cast<float>(sx) - static_cast<float>(dx), oy = static_cast<float>(sy) - static_cast<float>(dy);
             const float X0 = static_cast<float>(dx), Y0 = static_cast<float>(dy), X1 = X0 + 8.0f, Y1 = Y0 + 8.0f;
             std::vector<ShuffleVertex> &q = quads[hs * 2u + hd];
@@ -3076,6 +3265,17 @@ bool GSVkBackend::Impl::tryShuffle(const GSDrawState &s, const GSPrimitiveBatch 
         shuffleQuads[i].insert(shuffleQuads[i].end(), quads[i].begin(), quads[i].end());
     dst->usedW = std::max(dst->usedW, std::min(maxX, dst->pxW));
     dst->usedH = std::max(dst->usedH, std::min(maxY, dst->pxH));
+    ++stShufOk; // TEMP-DIAG gs-stats
+    {
+        static int okLog = 0; // TEMP-DIAG gs-stats
+        if (okLog < 4)
+        {
+            ++okLog;
+            ps2x::host::Log("host/gs-vk", "[gs-shuf-ok] fbp=%u fpsm=%u fbw=%u tbp=%u tbw=%u tpsm=%u fbmsk=%08x verts=%u",
+                            c.frame.fbp, (unsigned)c.frame.psm, c.frame.fbw, c.tex0.tbp0, c.tex0.tbw, (unsigned)c.tex0.psm,
+                            c.frame.fbmsk, (unsigned)b.vertices.size());
+        }
+    }
     return true;
 }
 
@@ -3125,7 +3325,7 @@ void GSVkBackend::Impl::flushShuffle()
         VkResult dscRes = gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc);
         if (!ubo.cpu || !valloc.cpu || dscRes != VK_SUCCESS)
         {
-            submitAndWait();
+            submitAndWait("shuffle");
             beginFrameCb();
             ubo = rings.alloc(sizeof(ShuffleUbo), 256);
             valloc = rings.alloc(vbytes, 16);
@@ -3210,7 +3410,7 @@ void GSVkBackend::Impl::uploadPaletteImage(const GSDrawState &s)
     auto a = staging.alloc(256 * 4, 16);
     if (!a.cpu)
     {
-        submitAndWait();
+        submitAndWait("palette");
         staging.reset();
         a = staging.alloc(256 * 4, 16);
         if (!a.cpu)
@@ -3244,7 +3444,9 @@ void GSVkBackend::Impl::ensurePresentImage(uint32_t w, uint32_t h)
     if (presentW == w && presentH == h && presentImage)
         return;
     flushPending();
-    submitAndWait();
+    submitAndWait("present-img");
+    if (failed)
+        return; // in-flight present may still sample these handles; never destroy them after a failed wait
     if (presentFb) gs_vk::vk.DestroyFramebuffer(device, presentFb, nullptr);
     if (presentView) gs_vk::vk.DestroyImageView(device, presentView, nullptr);
     if (presentImage) gs_vk::vk.DestroyImage(device, presentImage, nullptr);
@@ -3307,18 +3509,26 @@ void GSVkBackend::Impl::drawCircuit(VkImageView src, uint32_t cdbx, uint32_t cdb
     auto ubo = rings.alloc(sizeof(PresentUbo), 256);
     if (!ubo.cpu || gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc) != VK_SUCCESS)
     {
-        submitAndWait();
-        beginFrameCb();
-        ubo = rings.alloc(sizeof(PresentUbo), 256);
-        dai.descriptorPool = descPool;
-        gs_vk::vk.AllocateDescriptorSets(device, &dai, &dsc);
+        // NEVER flush here. drawCircuit runs inside the present render
+        // pass; submitting the shared command buffer with a pass still open
+        // corrupts the command stream and wedges the GPU on Mali (the
+        // submitted batch never completes and the fence wait times out).
+        // Present() pre-flights ring/descriptor headroom before opening the
+        // pass, so this is only a last-resort degrade: skip this circuit.
+        if ((++circuitSkips % 60u) == 1u)
+            ps2x::host::Log("W/host/gs-vk", "drawCircuit: allocation failed mid-pass, circuit skipped (x%u)", circuitSkips);
+        return;
     }
+    ++descSetsUsed;
+    if (failed || !ubo.cpu || dsc == VK_NULL_HANDLE)
+        return; // backend disabled: never memcpy into a null ring slot
     PresentUbo u{};
     u.uSrcOffset[0] = static_cast<int32_t>(cdbx * kScale);
     u.uSrcOffset[1] = static_cast<int32_t>(cdby * kScale);
     u.uSrcOffset[2] = ct24 ? 1 : 0;
     u.uSrcOffset[3] = alphaFactor ? 1 : 0;
     u.uSrcEdge[0] = static_cast<int32_t>(srcEdge);
+    u.uSrcEdge[1] = presentRotate;
     std::memcpy(ubo.cpu, &u, sizeof(u));
     VkDescriptorImageInfo texInfo{nearestSampler, src, VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorBufferInfo bufInfo{rings.buffer, ubo.offset, sizeof(PresentUbo)};
@@ -3378,7 +3588,32 @@ void GSVkBackend::Impl::ensureSwapchain()
     int sw = 0, sh = 0;
     ps2x::host::GetSurfaceSize(sw, sh);
 
-    const bool sizeChanged = (sw > 0 && sh > 0 && (static_cast<int>(swap.width) != sw || static_cast<int>(swap.height) != sh));
+    // Present-mode experiment selector (read once per process): the
+    // surface transform on this class of device is ROTATE_90 and the
+    // correct combination of swapchain extent / preTransform / shader
+    // pre-rotation is not obvious, so it can be switched without a
+    // rebuild. Modes: 0 = original (landscape extent, no pre-rotation),
+    // 1/2 = shader pre-rotate CW/CCW + transposed present image +
+    // landscape extent, 3/4 = same pre-rotation but PORTRAIT swapchain
+    // extent, 5 = portrait extent without pre-rotation, 6 = portrait
+    // extent + IDENTITY preTransform.
+    if (presentMode < 0)
+    {
+        presentMode = 0;
+        if (FILE *f = std::fopen("/sdcard/gow2/present_mode.txt", "r"))
+        {
+            int v = 0;
+            if (std::fscanf(f, "%d", &v) == 1 && v >= 0 && v <= 6)
+                presentMode = v;
+            std::fclose(f);
+        }
+        ps2x::host::Log("host/gs-vk", "Present mode: %d", presentMode);
+    }
+    const bool portraitExtent = presentMode >= 3;
+    const int expW = portraitExtent ? sh : sw;
+    const int expH = portraitExtent ? sw : sh;
+
+    const bool sizeChanged = (sw > 0 && sh > 0 && (static_cast<int>(swap.width) != expW || static_cast<int>(swap.height) != expH));
     if (swap.swapchain != VK_NULL_HANDLE && swap.ok && presentWindow == win && !swap.needsRecreate && !sizeChanged)
         return;
 
@@ -3429,7 +3664,7 @@ void GSVkBackend::Impl::ensureSwapchain()
 
     VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     ci.surface = swap.surface;
-    uint32_t minCount = std::max(2u, caps.minImageCount);
+    uint32_t minCount = std::max(3u, caps.minImageCount + 1u); // TEMP-DIAG diag73: deeper swapchain so FIFO acquire waits less
     if (caps.maxImageCount > 0 && minCount > caps.maxImageCount)
         minCount = caps.maxImageCount;
     ci.minImageCount = minCount;
@@ -3437,7 +3672,11 @@ void GSVkBackend::Impl::ensureSwapchain()
     ci.imageColorSpace = formats[0].colorSpace;
 
     VkSurfaceTransformFlagBitsKHR preTransform = caps.currentTransform;
+    if (presentMode == 6 && (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) != 0u)
+        preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     ci.preTransform = preTransform;
+    swap.transform = caps.currentTransform;
+    ps2x::host::Log("host/gs-vk", "Swapchain transform: current=0x%x supported=0x%x chosen=0x%x mode=%d", caps.currentTransform, caps.supportedTransforms, preTransform, presentMode);
 
     VkExtent2D extent = caps.currentExtent;
     if (extent.width == 0xFFFFFFFF || extent.height == 0xFFFFFFFF || extent.width == 0 || extent.height == 0)
@@ -3446,6 +3685,12 @@ void GSVkBackend::Impl::ensureSwapchain()
         uint32_t h = sh > 0 ? static_cast<uint32_t>(sh) : 720u;
         extent.width = std::max(caps.minImageExtent.width, std::min(caps.maxImageExtent.width, w));
         extent.height = std::max(caps.minImageExtent.height, std::min(caps.maxImageExtent.height, h));
+    }
+    if (portraitExtent)
+    {
+        std::swap(extent.width, extent.height);
+        extent.width = std::max(caps.minImageExtent.width, std::min(caps.maxImageExtent.width, extent.width));
+        extent.height = std::max(caps.minImageExtent.height, std::min(caps.maxImageExtent.height, extent.height));
     }
     ci.imageExtent = extent;
     ci.imageArrayLayers = 1;
@@ -3458,6 +3703,20 @@ void GSVkBackend::Impl::ensureSwapchain()
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    { // TEMP-DIAG diag73: prefer MAILBOX when the surface offers it (acquire never blocks)
+        uint32_t pmCount = 0;
+        if (gs_vk::vk.GetPhysicalDeviceSurfacePresentModesKHR && gs_vk::vk.GetPhysicalDeviceSurfacePresentModesKHR(phys, swap.surface, &pmCount, nullptr) == VK_SUCCESS && pmCount > 0u)
+        {
+            std::vector<VkPresentModeKHR> modes(pmCount);
+            if (gs_vk::vk.GetPhysicalDeviceSurfacePresentModesKHR(phys, swap.surface, &pmCount, modes.data()) == VK_SUCCESS)
+            {
+                for (VkPresentModeKHR m : modes)
+                    if (m == VK_PRESENT_MODE_MAILBOX_KHR)
+                        ci.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+                ps2x::host::Log("host/gs-vk", "Surface present modes count=%u chosen=%d", pmCount, (int)ci.presentMode);
+            }
+        }
+    }
     ci.clipped = VK_TRUE;
 
     VkSwapchainKHR oldSwap = swap.swapchain;
@@ -3523,6 +3782,9 @@ void GSVkBackend::Impl::destroySwapchain()
 PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
 {
     Impl &d = *m_impl;
+    const auto entT0 = std::chrono::steady_clock::now(); // TEMP-DIAG gs-stats
+    struct EntGuard { Impl *self; std::chrono::steady_clock::time_point t0; ~EntGuard() { self->stEntPresentNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(); ++self->stEntPresentN; } } entGuard{&d, entT0};
+    std::lock_guard<std::recursive_mutex> apiLock(d.apiMutex);
     PresentationFrame frame;
     if (d.failed || !d.ensure())
         return frame;
@@ -3649,7 +3911,15 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
     frame.height = outH;
     frame.pixels.assign(static_cast<size_t>(outW) * outH * 4u, 0u);
 
-    d.ensurePresentImage(outW, outH);
+    // Present-mode experiment (see ensureSwapchain): modes 1/3 pre-rotate
+    // the composition 90 degrees CW in the present shader, modes 2/4
+    // CCW; the present image gets transposed dimensions in those modes.
+    d.presentRotate = (d.presentMode == 1 || d.presentMode == 3) ? 1 : (d.presentMode == 2 || d.presentMode == 4) ? 2 : 0;
+    const bool transposed = d.presentRotate != 0;
+    const uint32_t presW = transposed ? outH : outW;
+    const uint32_t presH = transposed ? outW : outH;
+
+    d.ensurePresentImage(presW, presH);
     if (!d.presentFb)
         return frame;
 
@@ -3658,7 +3928,9 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
     bool hasSwapImage = false;
     if (d.swap.ok)
     {
+        const auto acqT0 = std::chrono::steady_clock::now(); // TEMP-DIAG gs-stats
         VkResult acq = gs_vk::vk.AcquireNextImageKHR(d.device, d.swap.swapchain, 1000000000ull, d.swap.acquired, VK_NULL_HANDLE, &swapIdx);
+        { const uint64_t ns = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - acqT0).count(); d.stPresAcqNs += ns; if (ns > d.stPresAcqMaxNs) d.stPresAcqMaxNs = ns; }
         if (acq == VK_SUCCESS || acq == VK_SUBOPTIMAL_KHR)
         {
             hasSwapImage = true;
@@ -3677,6 +3949,14 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
             ps2x::host::Log("W/host/gs-vk", "AcquireNextImageKHR failed: %d", acq);
         }
     }
+
+    if (!hasSwapImage && d.swap.ok) ++d.stPresNoImg; // TEMP-DIAG diag118
+    // Pre-flight the present circuits' capacity BEFORE the render pass
+    // opens: drawCircuit must never flush mid-pass (that wedged the GPU),
+    // so if the ring or the descriptor pool is close to full, drain here
+    // where no pass is open yet.
+    if (!d.failed && (d.rings.offset + 4096u > d.rings.capacity || d.descSetsUsed > 8000u))
+        d.submitAndWait("present-pre");
 
     d.beginFrameCb();
     // Mobile TBDR barrier: Ensure color attachment writes to render targets are visible before present sampling
@@ -3702,7 +3982,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
         rb.renderPass = d.rpPresent;
         rb.framebuffer = d.presentFb;
-        rb.renderArea.extent = {outW, outH};
+        rb.renderArea.extent = {presW, presH};
         VkClearValue clear{};
         clear.color = {{static_cast<float>(request.bgcolor & 0xFFu) / 255.f,
                         static_cast<float>((request.bgcolor >> 8) & 0xFFu) / 255.f,
@@ -3711,8 +3991,8 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         rb.pClearValues = &clear;
         rb.clearValueCount = 1;
         gs_vk::vk.CmdBeginRenderPass(d.frameCb, &rb, VK_SUBPASS_CONTENTS_INLINE);
-        VkViewport viewport{0.0f, 0.0f, static_cast<float>(outW), static_cast<float>(outH), 0.0f, 1.0f};
-        VkRect2D scissor{{0, 0}, {outW, outH}};
+        VkViewport viewport{0.0f, 0.0f, static_cast<float>(presW), static_cast<float>(presH), 0.0f, 1.0f};
+        VkRect2D scissor{{0, 0}, {presW, presH}};
         gs_vk::vk.CmdSetViewport(d.frameCb, 0, 1, &viewport);
         gs_vk::vk.CmdSetScissor(d.frameCb, 0, 1, &scissor);
         const uint32_t srcEdge = static_cast<uint32_t>(std::lround(2.0f * kScale));
@@ -3770,6 +4050,31 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         gs_vk::vk.CmdEndRenderPass(d.frameCb);
         (void)slbg;
     }
+    // TEMP-DUMP (orientation debugging): when /sdcard/gow2/dump_present.txt
+    // exists, copy this present image to the readback buffer once; the
+    // pixels are written to a PPM after the present fence below.
+    static bool s_dumpDone = false;
+    const bool dumpWanted = !s_dumpDone && d.presentCount > 300 && [] {
+        FILE *f = std::fopen("/sdcard/gow2/dump_present.txt", "r");
+        if (f) { std::fclose(f); return true; }
+        return false;
+    }();
+    if (dumpWanted)
+    {
+        VkImageMemoryBarrier pbar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        pbar.image = d.presentImage;
+        pbar.srcQueueFamilyIndex = pbar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        pbar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        pbar.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        pbar.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        pbar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        pbar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &pbar);
+        VkBufferImageCopy cp{};
+        cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        cp.imageExtent = {presW, presH, 1};
+        gs_vk::vk.CmdCopyImageToBuffer(d.frameCb, d.presentImage, VK_IMAGE_LAYOUT_GENERAL, d.readbackBuffer, 1, &cp);
+    }
     if (hasSwapImage)
     {
         VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -3794,7 +4099,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
 
             VkImageBlit blit{};
             blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            blit.srcOffsets[1] = {static_cast<int32_t>(outW), static_cast<int32_t>(outH), 1};
+            blit.srcOffsets[1] = {static_cast<int32_t>(presW), static_cast<int32_t>(presH), 1};
             blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             blit.dstOffsets[1] = {static_cast<int32_t>(d.swap.width), static_cast<int32_t>(d.swap.height), 1};
             gs_vk::vk.CmdBlitImage(d.frameCb, d.presentImage, VK_IMAGE_LAYOUT_GENERAL, d.swap.images[swapIdx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
@@ -3826,6 +4131,12 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         pi.pSwapchains = &d.swap.swapchain;
         pi.pImageIndices = &swapIdx;
         VkResult presRes = gs_vk::vk.QueuePresentKHR(d.queue, &pi);
+        // TEMP-DIAG diag118 census
+        if (swapIdx < 8u) ++d.stPresIdx[swapIdx];
+        if (presRes == VK_SUCCESS) ++d.stPresResOk;
+        else if (presRes == VK_SUBOPTIMAL_KHR) ++d.stPresResSub;
+        else if (presRes == VK_ERROR_OUT_OF_DATE_KHR) ++d.stPresResOod;
+        else ++d.stPresResOther;
         if (presRes == VK_ERROR_OUT_OF_DATE_KHR)
         {
             d.swap.needsRecreate = true;
@@ -3852,11 +4163,57 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         d.cbState = Impl::CbState::Initial;
         d.emptyTrash();
 
+        { // TEMP-DIAG diag79: dump raw RT images for fbp 8 and 232 on flag file
+            static bool rtDumpDone = false;
+            if (!rtDumpDone && d.presentCount > 300)
+            {
+                FILE *f = std::fopen("/sdcard/gow2/dump_rt.txt", "rb");
+                if (f)
+                {
+                    std::fclose(f);
+                    rtDumpDone = true;
+                    std::remove("/sdcard/gow2/dump_rt.txt");
+                    for (uint32_t want : {8u, 232u})
+                    {
+                        Impl::RenderTarget *rt = d.findTarget(want);
+                        if (rt && d.readTargetCpu(*rt))
+                        {
+                            char path[64];
+                            std::snprintf(path, sizeof(path), "/sdcard/gow2/rt%u.ppm", want);
+                            if (FILE *out = std::fopen(path, "wb"))
+                            {
+                                std::fprintf(out, "P6\n%u %u\n255\n", rt->pxW, rt->pxH);
+                                const uint8_t *px = rt->cpu.data();
+                                for (size_t i = 0; i + 4 <= rt->cpu.size(); i += 4)
+                                    std::fwrite(px + i, 1, 3, out);
+                                std::fclose(out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if (d.presentCount <= 10 || (d.presentCount % 60) == 0)
         {
             ps2x::host::Log("host/gs-vk", "Frame %d presented OK (%ux%u -> %ux%u) pmode=0x%llx fbp1=%u fbp2=%u ok1=%d ok2=%d",
                             d.presentCount, outW, outH, d.swap.width, d.swap.height,
                             (unsigned long long)request.pmode, fbp1, fbp2, ok1 ? 1 : 0, ok2 ? 1 : 0);
+        }
+        if (dumpWanted)
+        {
+            s_dumpDone = true;
+            std::remove("/sdcard/gow2/dump_present.txt");
+            if (FILE *out = std::fopen("/sdcard/gow2/present_dump.ppm", "wb"))
+            {
+                std::fprintf(out, "P6\n%u %u\n255\n", presW, presH);
+                const uint8_t *px = static_cast<const uint8_t *>(d.readbackMapped);
+                if (px)
+                    for (uint32_t i = 0; i < presW * presH; ++i)
+                        std::fwrite(px + static_cast<size_t>(i) * 4u, 1, 3, out);
+                std::fclose(out);
+            }
+            ps2x::host::Log("host/gs-vk", "Present dump written: %ux%u", presW, presH);
         }
     }
     else
@@ -3874,7 +4231,7 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
 
         VkBufferImageCopy cp{};
         cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        cp.imageExtent = {outW, outH, 1};
+        cp.imageExtent = {presW, presH, 1};
         gs_vk::vk.CmdCopyImageToBuffer(d.frameCb, d.presentImage, VK_IMAGE_LAYOUT_GENERAL, d.readbackBuffer, 1, &cp);
         d.endFrameCb();
 

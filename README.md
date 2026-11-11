@@ -9,7 +9,7 @@ emulator frontend.
 The engine is [`DaniSBR1/PS2Recomp`](https://github.com/DaniSBR1/PS2Recomp)
 (branch `godofwar2`, pinned at `379fa48`) — the same runtime as the working PC
 port — fetched as the `PS2Recomp/` submodule. The kit patches it with a small
-stack of `-p1` patches (`patches/0001`–`0004`) applied in order by
+stack of `-p1` patches (`patches/0001`–`0009`) applied in order by
 `scripts/setup.ps1`.
 
 > This repository contains **no game code**: no ISO, no ELF, no generated C++,
@@ -17,21 +17,37 @@ stack of `-p1` patches (`patches/0001`–`0004`) applied in order by
 
 ## Status
 
-**M2 build side is done (2026-10-31): the raw Vulkan GS backend exists, compiles
-for arm64, and the APK now ships with it** — the null-GS switch is off. What
-remains is device work: boot, pixels, input, audio, performance.
+**M3 device bring-up is well advanced (2026-11-11): the game boots, plays its
+opening movie, and renders the first playable area on real hardware** — on a
+Redfinger cloud phone (Galaxy S25+, Adreno; earlier runs on a Galaxy Note20,
+Mali-G77). Native VU1/IOP code is generated and linked (VU1 ≈10× faster than
+interpretation), the GS composition path produces correct pixels on screen,
+and the guest's mode state machine has been mapped end to end: after the
+movie the game waits in mode 11, and the pad sequence **SELECT → X → START**
+walks it through modes 12 → 11 → 13, where the character-update branch runs
+continuously. One gate remains before this is *playable*: in mode 13 the
+character does not yet move under analog-stick input — that investigation is
+the current work item (see `TASKS.md`).
+
+The working tree also carries TEMP-DIAG instrumentation (guest-state probes,
+GS counters, dump facilities in `gs_vk_backend.cpp` / `gow2_overrides.cpp` /
+`jni_bridge.cpp`) that will be removed once playability is established; the
+permanent fixes from this phase (GPU wedge fix, MAILBOX swapchain, channel
+shuffle relaxations, CT32 present path, native VU1/IOP wiring) are the parts
+that stay.
 
 | Milestone | State |
 | --- | --- |
 | **M0** — rebase the kit onto PS2Recomp, tools build, ELF verified | **done** 2026-10-26 |
-| **M1** — Android arm64 host layer, app shell, APK end to end | **build side done** 2026-10-30 (device bring-up pending) |
-| **M2** — raw Vulkan GS backend (`GSVkBackend`) | **build side done** 2026-10-31 — pixels pending on real hardware |
-| **M3** — playability: native VU1/IOP, input & audio tuning, performance | sensor/touch/audio code in place, untested; capture pass pending |
+| **M1** — Android arm64 host layer, app shell, APK end to end | **done** — device boot verified 2026-11-09 |
+| **M2** — raw Vulkan GS backend (`GSVkBackend`) | **done** — correct pixels on device 2026-11-11 |
+| **M3** — playability: native VU1/IOP, input & audio tuning, performance | **in progress** — native VU1/IOP done; movie + first area render; mode machine mapped (SELECT → X → START reaches mode 13); character locomotion under stick input still gated |
 
-Current deliverable: `gow2-android-debug.apk` (56 MB, arm64-v8a, Vulkan GS) —
-also published as
-[`v0.4.0-m2`](https://github.com/EvilNathan/gow2-android-apk/releases/tag/v0.4.0-m2)
-in the private APK archive.
+Current deliverable: `gow2-android-debug.apk` (arm64-v8a, Vulkan GS), built
+with `scripts/build-android.sh` / `.ps1`. Stable releases are published to the
+private APK archive
+([`v0.4.0-m2`](https://github.com/EvilNathan/gow2-android-apk/releases/tag/v0.4.0-m2)
+is the latest tagged one; M3 test builds circulate as debug APKs only).
 
 ## Requirements
 
@@ -151,7 +167,7 @@ backend, `-NullGs:$true` builds the M1 no-op GS.
 | `android-runner/native/host/` | `ps2x_host.h` contract implementation: window, AAudio, touch/gamepad, storage, crash capture |
 | `android-runner/native/iso/` | in-app ISO9660 reader + SHA1 boot-ELF extractor |
 | `compat/arm64/` | `immintrin.h`-style shims over sse2neon |
-| `patches/` | `0001` read ISO · `0002` null GS · `0003` Vulkan GS select · `0004` Android host |
+| `patches/` | `0001` read ISO · `0002` null GS · `0003` Vulkan GS select · `0004` Android host · `0005` GS CSR event count · `0006` IOP diagnostics · `0007` libsd tracing · `0008` SMPD status slots · `0009` EE status readback |
 | `config/`, `overrides/` | recompiler inputs for GoW II |
 | `tests/gs_probe/` | offscreen Vulkan backend tests (SwiftShader or any desktop ICD) |
 | `tools/` | ISO/ELF/IRX/VU dump helpers (game-derived output stays local) |
@@ -160,17 +176,20 @@ backend, `-NullGs:$true` builds the M1 no-op GS.
 
 ## Roadmap
 
-Remaining work needs hardware — see [`TASKS.md`](TASKS.md) for the full list:
+See [`TASKS.md`](TASKS.md) for the full list. Device bring-up, the capture
+pass and native VU1/IOP generation are done; what remains is the playability
+pass:
 
-1. **Device bring-up** (any arm64 Android 9+): install the APK, import the
-   ISO, capture logcat with `run-headless.ps1 -Android`, fix what the real
-   Adreno/Mali path disagrees with.
-2. **PC capture pass** (a machine with a GPU): boot the desktop runner to the
-   menu / first area with `GOW_VU1_CAPTURA` + the IOP dump env vars, then
-   `scripts/gen-native.ps1` for the native VU1/IOP generators and measure the
-   FPS gain (~20 FPS menu / ~10 FPS first area are the interpreter baselines).
-3. Then the playability pass: input/audio tuning on device, performance and
-   the Android 15 16 KB-page matrix.
+1. **Mode-13 locomotion gate**: find why the character does not move under
+   stick input once the mode machine reaches mode 13 (pad delivery, the
+   mode-13 character branch and the action-request chain are all verified
+   live; the missing link is inside the mode-13 update).
+2. **Present-path performance**: double-buffer the frame resources so
+   `Present()` no longer waits on the previous frame's fence (the heavy
+   phases run at ~8 guest flips/s largely because of this serialization).
+3. **Cleanup + release**: strip the TEMP-DIAG instrumentation, hard-code the
+   verified rotation behaviour, fix the crash handler's ring-dump copy, then
+   publish an M3 release to the private APK archive.
 
 ## Legal
 

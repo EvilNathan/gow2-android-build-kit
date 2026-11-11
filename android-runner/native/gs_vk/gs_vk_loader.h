@@ -39,6 +39,7 @@ namespace gs_vk
         PFN_vkGetPhysicalDeviceSurfaceSupportKHR GetPhysicalDeviceSurfaceSupportKHR = nullptr;
         PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR GetPhysicalDeviceSurfaceCapabilitiesKHR = nullptr;
         PFN_vkGetPhysicalDeviceSurfaceFormatsKHR GetPhysicalDeviceSurfaceFormatsKHR = nullptr;
+        PFN_vkGetPhysicalDeviceSurfacePresentModesKHR GetPhysicalDeviceSurfacePresentModesKHR = nullptr;
         PFN_vkCreateDevice CreateDevice = nullptr;
         PFN_vkGetDeviceProcAddr GetDeviceProcAddr = nullptr;
         PFN_vkDestroySurfaceKHR DestroySurfaceKHR = nullptr;

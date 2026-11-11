@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
@@ -106,6 +107,26 @@ _Unwind_Reason_Code BacktraceCallback(_Unwind_Context* context, void* argument)
             out.Decimal(static_cast<uint64_t>(state->index));
             out.String(" ");
             out.Hex(pc);
+            // TEMP-DIAG diag95: resolve module + file offset + nearest symbol so
+            // crash PCs can be addr2line'd against the unstripped .so.
+            Dl_info info{};
+            if (dladdr(reinterpret_cast<const void*>(pc), &info) != 0 && info.dli_fbase != nullptr) {
+                const char* fname = info.dli_fname != nullptr ? info.dli_fname : "?";
+                const char* base = fname;
+                for (const char* p = fname; *p != '\0'; ++p)
+                    if (*p == '/')
+                        base = p + 1;
+                out.String(" mod=");
+                out.String(base);
+                out.String(" off=");
+                out.Hex(pc - static_cast<uintptr_t>(reinterpret_cast<uintptr_t>(info.dli_fbase)));
+                if (info.dli_sname != nullptr) {
+                    out.String(" sym=");
+                    out.String(info.dli_sname);
+                    out.String("+");
+                    out.Hex(pc - static_cast<uintptr_t>(reinterpret_cast<uintptr_t>(info.dli_saddr)));
+                }
+            }
             out.Char('\n');
         }
         __android_log_print(ANDROID_LOG_FATAL, "ps2x/crash", "  #%d 0x%lx", state->index, static_cast<unsigned long>(pc));
