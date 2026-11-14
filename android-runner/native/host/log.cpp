@@ -35,7 +35,7 @@ char g_logDir[kPathLen] = {0};
 size_t g_logBytesWritten = 0;
 uint32_t g_linesSinceFlush = 0;
 bool g_capLogged = false;
-constexpr size_t kMaxLogFileBytes = 80 * 1024 * 1024; // 80 MB cap (TEMP-DIAG: raised from 10 MB so a full boot + movie + transition fits in one log)
+constexpr size_t kMaxLogFileBytes = 512 * 1024 * 1024; // 512 MB cap (TEMP-DIAG: diag120 soak needs more than the 80 MB that diag119 exhausted)
 
 // "HH:MM:SS.mmm" — never throws, no allocation.
 void FormatClock(char* out, size_t cap)
@@ -120,7 +120,7 @@ void WriteLineLocked(const char* tag, const char* message)
     if (g_logBytesWritten >= kMaxLogFileBytes) {
         if (!g_capLogged) {
             g_capLogged = true;
-            std::fprintf(g_logFile, "%s %5d [host] Log size limit (10MB) reached. Suppressing further disk logs.\n",
+            std::fprintf(g_logFile, "%s %5d [host] Log size limit (512MB) reached. Suppressing further disk logs.\n",
                          stamp, static_cast<int>(tid));
             std::fflush(g_logFile);
         }

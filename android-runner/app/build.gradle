@@ -8,6 +8,26 @@ def ps2xNullGs = (project.findProperty('ps2xNullGs') ?: 'OFF').toString().toUppe
 def ps2xGsVk = (project.findProperty('ps2xGsVk') ?: 'ON').toString().toUpperCase()
 def ps2xNativeVu1Dir = project.findProperty('ps2xNativeVu1Dir') ?: ''
 def appId = 'com.gow2.android'
+
+// Resolve the generated native VU1 directory (scripts/gen-native output) to an
+// absolute path. Accepts an absolute path or one relative to the repo root, so
+// the same gradle.properties works on any workstation (the committed value is
+// relative and gitignored at the destination).
+def resolveNativeVu1Dir() {
+    if (ps2xNativeVu1Dir.isEmpty())
+        return ''
+    def f = new File(ps2xNativeVu1Dir)
+    if (f.isAbsolute() && f.exists())
+        return ps2xNativeVu1Dir.replace('\\', '/')
+    def rel = new File(rootProject.projectDir.parentFile, ps2xNativeVu1Dir)
+    if (rel.exists())
+        return rel.absolutePath.replace('\\', '/')
+    def alt = new File(rootProject.projectDir.parentFile, 'generated/vu1n')
+    if (alt.exists())
+        return alt.absolutePath.replace('\\', '/')
+    println "WARNING: ps2xNativeVu1Dir '${ps2xNativeVu1Dir}' does not exist; building without native VU1 parts"
+    return ''
+}
 def filesDir = "/storage/emulated/0/Android/data/${appId}/files"
 
 android {
@@ -40,7 +60,7 @@ android {
                         "-DPS2X_DEFAULT_BOOT_ELF=${filesDir}/${ps2xBootElfName}",
                         "-DPS2X_FORCE_NULL_GS=${ps2xNullGs}",
                         "-DPS2X_GS_VK=${ps2xGsVk}",
-                        "-DPS2X_ANDROID_NATIVE_VU1_DIR=${ps2xNativeVu1Dir}",
+                        "-DPS2X_ANDROID_NATIVE_VU1_DIR=${resolveNativeVu1Dir()}",
                         '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF',
                         '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF'
                 targets 'ps2EntryRunner'

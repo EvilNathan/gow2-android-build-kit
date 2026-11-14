@@ -4050,31 +4050,6 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         gs_vk::vk.CmdEndRenderPass(d.frameCb);
         (void)slbg;
     }
-    // TEMP-DUMP (orientation debugging): when /sdcard/gow2/dump_present.txt
-    // exists, copy this present image to the readback buffer once; the
-    // pixels are written to a PPM after the present fence below.
-    static bool s_dumpDone = false;
-    const bool dumpWanted = !s_dumpDone && d.presentCount > 300 && [] {
-        FILE *f = std::fopen("/sdcard/gow2/dump_present.txt", "r");
-        if (f) { std::fclose(f); return true; }
-        return false;
-    }();
-    if (dumpWanted)
-    {
-        VkImageMemoryBarrier pbar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        pbar.image = d.presentImage;
-        pbar.srcQueueFamilyIndex = pbar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        pbar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        pbar.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        pbar.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        pbar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        pbar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &pbar);
-        VkBufferImageCopy cp{};
-        cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        cp.imageExtent = {presW, presH, 1};
-        gs_vk::vk.CmdCopyImageToBuffer(d.frameCb, d.presentImage, VK_IMAGE_LAYOUT_GENERAL, d.readbackBuffer, 1, &cp);
-    }
     if (hasSwapImage)
     {
         VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -4163,30 +4138,55 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
         d.cbState = Impl::CbState::Initial;
         d.emptyTrash();
 
-        { // TEMP-DIAG diag79: dump raw RT images for fbp 8 and 232 on flag file
-            static bool rtDumpDone = false;
-            if (!rtDumpDone && d.presentCount > 300)
+        { // TEMP-DIAG diag79: dump raw RT images; the flag file holds the fbp
+          // list ("8,232" by default). Re-dumps every ~2 s while the file
+          // remains, so one process can capture several game phases.
+            static uint32_t s_lastRtDumpAt = 0;
+            if (d.presentCount > 300 && d.presentCount - s_lastRtDumpAt >= 120)
             {
                 FILE *f = std::fopen("/sdcard/gow2/dump_rt.txt", "rb");
                 if (f)
                 {
+                    char list[96] = "";
+                    const size_t nRead = std::fread(list, 1, sizeof(list) - 1, f);
+                    list[nRead] = '\0';
                     std::fclose(f);
-                    rtDumpDone = true;
-                    std::remove("/sdcard/gow2/dump_rt.txt");
-                    for (uint32_t want : {8u, 232u})
+                    uint32_t fbps[6] = {8u, 232u};
+                    int nFbps = 2;
+                    for (char *p = list; *p && nFbps < 6;)
                     {
-                        Impl::RenderTarget *rt = d.findTarget(want);
-                        if (rt && d.readTargetCpu(*rt))
+                        char *end = nullptr;
+                        const long v = std::strtol(p, &end, 0);
+                        if (end != p)
                         {
-                            char path[64];
-                            std::snprintf(path, sizeof(path), "/sdcard/gow2/rt%u.ppm", want);
-                            if (FILE *out = std::fopen(path, "wb"))
+                            if (v >= 0 && v < 1024)
+                                fbps[nFbps++] = static_cast<uint32_t>(v);
+                            p = end;
+                        }
+                        else
+                            ++p;
+                    }
+                    {
+                        s_lastRtDumpAt = d.presentCount;
+                        ps2x::host::Log("host/gs-vk", "RT dump #%u: dispfb1=%u dispfb2=%u targets:", d.presentCount, fbp1, fbp2);
+                        for (const auto &t : d.targets)
+                            ps2x::host::Log("host/gs-vk", "  rt fbp=%u %ux%u ver=%u", t->fbp, t->pxW, t->pxH, t->version);
+                        for (int i = 0; i < nFbps; ++i)
+                        {
+                            const uint32_t want = fbps[i];
+                            Impl::RenderTarget *rt = d.findTarget(want);
+                            if (rt && d.readTargetCpu(*rt))
                             {
-                                std::fprintf(out, "P6\n%u %u\n255\n", rt->pxW, rt->pxH);
-                                const uint8_t *px = rt->cpu.data();
-                                for (size_t i = 0; i + 4 <= rt->cpu.size(); i += 4)
-                                    std::fwrite(px + i, 1, 3, out);
-                                std::fclose(out);
+                                char path[64];
+                                std::snprintf(path, sizeof(path), "/sdcard/gow2/rt%u.ppm", want);
+                                if (FILE *out = std::fopen(path, "wb"))
+                                {
+                                    std::fprintf(out, "P6\n%u %u\n255\n", rt->pxW, rt->pxH);
+                                    const uint8_t *px = rt->cpu.data();
+                                    for (size_t j = 0; j + 4 <= rt->cpu.size(); j += 4)
+                                        std::fwrite(px + j, 1, 3, out);
+                                    std::fclose(out);
+                                }
                             }
                         }
                     }
@@ -4200,20 +4200,60 @@ PresentationFrame GSVkBackend::Present(const GSPresentationRequest &request)
                             d.presentCount, outW, outH, d.swap.width, d.swap.height,
                             (unsigned long long)request.pmode, fbp1, fbp2, ok1 ? 1 : 0, ok2 ? 1 : 0);
         }
+        // TEMP-DUMP (menu/FMV diagnostics): while /sdcard/gow2/dump_present.txt
+        // exists, re-dump the composed present image every ~2 s (120 presents),
+        // so one process can capture several game phases into the same PPM.
+        static uint32_t s_lastDumpAt = 0;
+        const bool dumpWanted = d.presentCount > 300 && d.presentCount - s_lastDumpAt >= 120 && [] {
+            FILE *f = std::fopen("/sdcard/gow2/dump_present.txt", "r");
+            if (f) { std::fclose(f); return true; }
+            return false;
+        }();
         if (dumpWanted)
         {
-            s_dumpDone = true;
-            std::remove("/sdcard/gow2/dump_present.txt");
-            if (FILE *out = std::fopen("/sdcard/gow2/present_dump.ppm", "wb"))
+            s_lastDumpAt = d.presentCount;
+            // Dedicated submit (same proven pattern as readTargetCpu): the
+            // in-CB variant raced the swapchain blit and produced striped garbage.
+            d.flushPending();
+            d.submitAndWait("present-dump-pre");
+            d.beginFrameCb();
+            VkImageMemoryBarrier pbar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            pbar.image = d.presentImage;
+            pbar.srcQueueFamilyIndex = pbar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            pbar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            pbar.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+            pbar.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            pbar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            pbar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            gs_vk::vk.CmdPipelineBarrier(d.frameCb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &pbar);
+            VkBufferImageCopy cp{};
+            cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            cp.imageExtent = {presW, presH, 1};
+            gs_vk::vk.CmdCopyImageToBuffer(d.frameCb, d.presentImage, VK_IMAGE_LAYOUT_GENERAL, d.readbackBuffer, 1, &cp);
+            d.endFrameCb();
+            VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            su.commandBufferCount = 1;
+            su.pCommandBuffers = &d.frameCb;
+            gs_vk::vk.ResetFences(d.device, 1, &d.frameFence);
+            gs_vk::vk.QueueSubmit(d.queue, 1, &su, d.frameFence);
+            if (d.waitFrameFence("present-dump"))
             {
-                std::fprintf(out, "P6\n%u %u\n255\n", presW, presH);
-                const uint8_t *px = static_cast<const uint8_t *>(d.readbackMapped);
-                if (px)
-                    for (uint32_t i = 0; i < presW * presH; ++i)
-                        std::fwrite(px + static_cast<size_t>(i) * 4u, 1, 3, out);
-                std::fclose(out);
+                gs_vk::vk.ResetCommandBuffer(d.frameCb, 0);
+                gs_vk::vk.ResetCommandPool(d.device, d.cmdPool, 0);
+                d.cbOpen = false;
+                d.cbState = Impl::CbState::Initial;
+                d.emptyTrash();
+                if (FILE *out = std::fopen("/sdcard/gow2/present_dump.ppm", "wb"))
+                {
+                    std::fprintf(out, "P6\n%u %u\n255\n", presW, presH);
+                    const uint8_t *px = static_cast<const uint8_t *>(d.readbackMapped);
+                    if (px)
+                        for (uint32_t i = 0; i < presW * presH; ++i)
+                            std::fwrite(px + static_cast<size_t>(i) * 4u, 1, 3, out);
+                    std::fclose(out);
+                }
+                ps2x::host::Log("host/gs-vk", "Present dump written: %ux%u", presW, presH);
             }
-            ps2x::host::Log("host/gs-vk", "Present dump written: %ux%u", presW, presH);
         }
     }
     else
