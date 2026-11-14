@@ -17,7 +17,7 @@ stack of `-p1` patches (`patches/0001`–`0009`) applied in order by
 
 ## Status
 
-**M3 device bring-up is well advanced (2026-11-11): the game boots, plays its
+**M3 device bring-up is well advanced (2026-11-14): the game boots, plays its
 opening movie, and renders the first playable area on real hardware** — on a
 Redfinger cloud phone (Galaxy S25+, Adreno; earlier runs on a Galaxy Note20,
 Mali-G77). Native VU1/IOP code is generated and linked (VU1 ≈10× faster than
@@ -26,8 +26,13 @@ and the guest's mode state machine has been mapped end to end: after the
 movie the game waits in mode 11, and the pad sequence **SELECT → X → START**
 walks it through modes 12 → 11 → 13, where the character-update branch runs
 continuously. One gate remains before this is *playable*: in mode 13 the
-character does not yet move under analog-stick input — that investigation is
-the current work item (see `TASKS.md`).
+character does not yet move under analog-stick input. The 2026-11-14
+diagnostic run (diag119) narrowed it further: the stick *does* reach the
+guest pad struct (cooked analog float reads exactly ±1.0 in both directions)
+and a forced player gate (`+0x394`) did not move the character, so the block
+is downstream of pad delivery — the current work item is a call-profile run
+(diag120) to see which update functions actually execute in mode 13 (see
+`TASKS.md` and `VERIFICATION.md`).
 
 The working tree also carries TEMP-DIAG instrumentation (guest-state probes,
 GS counters, dump facilities in `gs_vk_backend.cpp` / `gow2_overrides.cpp` /
@@ -41,7 +46,7 @@ that stay.
 | **M0** — rebase the kit onto PS2Recomp, tools build, ELF verified | **done** 2026-10-26 |
 | **M1** — Android arm64 host layer, app shell, APK end to end | **done** — device boot verified 2026-11-09 |
 | **M2** — raw Vulkan GS backend (`GSVkBackend`) | **done** — correct pixels on device 2026-11-11 |
-| **M3** — playability: native VU1/IOP, input & audio tuning, performance | **in progress** — native VU1/IOP done; movie + first area render; mode machine mapped (SELECT → X → START reaches mode 13); character locomotion under stick input still gated |
+| **M3** — playability: native VU1/IOP, input & audio tuning, performance | **in progress** — native VU1/IOP done; movie + first area render; mode machine mapped (SELECT → X → START reaches mode 13); stick delivery to the guest pad struct proven in both directions (diag119, 2026-11-14); character locomotion under stick input still gated — next: diag120 call profile of mode 13 |
 
 Current deliverable: `gow2-android-debug.apk` (arm64-v8a, Vulkan GS), built
 with `scripts/build-android.sh` / `.ps1`. Stable releases are published to the

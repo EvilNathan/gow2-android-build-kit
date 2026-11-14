@@ -2,14 +2,21 @@
 
 Statuses: `[ ]` todo, `[~]` in progress, `[x]` done, `[!]` blocked.
 
-_Last update: 2026-11-11 (M3 device phase: the game boots, plays the opening
+_Last update: 2026-11-14 (M3 device phase: the game boots, plays the opening
 movie and renders the first area on real hardware — Redfinger cloud phones,
 Mali-G77 then Adreno in a Galaxy S25+. Native VU1/IOP are generated and
 linked, GS composition is pixel-correct on screen, and the guest mode
 machine is mapped: post-movie the game waits in mode 11 and the sequence
-SELECT → X → START reaches mode 13. Remaining gate: the character does not
-yet move under stick input in mode 13. The working tree carries TEMP-DIAG
-instrumentation pending cleanup — see "Known issues".)_
+SELECT → X → START reaches mode 13. The 2026-11-14 diag119 run proved the
+stick reaches the guest pad struct in both directions (cooked analog ±1.0)
+while the player action block stays frozen, and a forced player gate
+(`+0x394`, 40 applications) did not move the character — so the gate is
+downstream of pad delivery. Static reads corrected the map: `FUN_001E9310`
+is an animation/path walker (idle in mode 13), the mode-13 handler is
+`FUN_0025D370`, and the player update is `FUN_001E6000`. Next step is a
+call-profile run (diag120) to see which update functions actually execute in
+mode 13. The working tree carries TEMP-DIAG instrumentation pending cleanup
+— see "Known issues".)_
 
 ## M0 — rebase onto PS2Recomp (done 2026-10-26)
 
@@ -135,13 +142,38 @@ instrumentation pending cleanup — see "Known issues".)_
       **X** → 11 → **START** → **13**. In mode 13 the character branch
       `FUN_001E9310` (gated on mode == 13 inside `FUN_001E6000`) runs
       continuously (~7,900 calls in the verification run).
-- [!] **Character locomotion in mode 13**: with the stick held for minutes in
-      mode 13 the rendered scene is a fixed point and the player object's
-      first 256 bytes show no position change (only state fields +0x08
-      0→2 and +0x14 188→167 across the 11→13 transition). Pad delivery is
-      proven, so the gate is inside/beyond the mode-13 update — next step is
-      the action-block census (`+0x1F00..+0x1FFF` of the player object, where
-      `FUN_001E9310` and `padConsA` work) across stick directions.
+- [x] **Mode-13 call map corrected by static reads (2026-11-14)**:
+      `FUN_0025AD58` dispatches modes through a jump table at `0x2FF410`;
+      mode 13 → `FUN_0025D370`, which only writes mode = 11 when
+      `[[0x2D85E4]+0x39C]` is non-null (null in the observed run, so the
+      game stays in 13). `FUN_001E6000` is the player-entity update: mode 11
+      → reads buttons (`FUN_001E5AF0`) + a timer; mode 13 → calls
+      `FUN_001E9310` with `a1 = 0`; mode 3 → `FUN_001E9BD0`. It has no direct
+      callers in the generated code (indirect dispatch). `FUN_001E9310` is
+      **not** locomotion: it walks a list at `[player+0x1F10]` and runs eight
+      `func_1E95E8` transforms — with the list head null it early-returns,
+      so its frozen action block (`+0x1F00..+0x1FFF`) is expected, not a
+      symptom. Button readers are `FUN_001E5AF0` (mode 11, via `FUN_001E6000`)
+      and `FUN_0025CEC8` (mode-11 handler in the dispatcher). The pad
+      processor `FUN_00278100` writes cooked values into the `0x32F300`-region
+      struct (called by `FUN_002A7728`); the cooked analog floats at
+      `pad+0x38/0x3C/0x58/0x5C` (`0x32F3B8/BC/D8/DC`) are never read by any
+      generated function through an absolute address — the consumer reads
+      them through a pointer (unresolved). The 75 stub functions in
+      `ps2_recompiled_stubs.h` (`0x2AB3E0`–`0x2D65B0`) are all outside the
+      player/pad path.
+- [!] **Character locomotion in mode 13**: diag119 run (2026-11-14, same
+      build): stick up reads `ax3c = +1.0` (`b20` byte `0x00`), stick down
+      reads `ax3c = -1.0` (`b20` byte `0xFF`) — delivery to the guest pad
+      struct is proven in both directions — while the player action block
+      (`+0x1F00..+0x1FFF`) stays byte-frozen and the first 256 bytes show no
+      position change (only `+0x08` 0→2, `+0x14` drifting 167→180 over the
+      run, and incrementing counter words at `+0xB0/B4/B8`). The causal
+      force-test on the player `+0x394` gate (flag file, applied 40× across
+      the down/right stick windows) moved nothing: the 09:02 screenshot is
+      byte-identical to the 08:47 one. The gate is downstream of pad
+      delivery and is not `+0x394` — next step is a call-profile run
+      (diag120) to learn which update functions actually execute in mode 13.
 - [ ] Performance pass: `Present()` still serializes on a single fence
       (~2 s per 5 s window in the heavy phases; guest ~8 flips/s there vs
       ~88/s in the light modes). Fix candidate: double-buffered frame
@@ -152,13 +184,21 @@ instrumentation pending cleanup — see "Known issues".)_
 
 ## Open TODOs (ordered, for the next session)
 
-1. **Mode-13 locomotion gate** (the playable blocker): census the player
-   object's action block `+0x1F00..+0x1FFF` plus the pad analog floats across
-   stick directions in mode 13 (diag119 build already prints them in the
-   watch thread); read the mode-13 update body (`FUN_0025D370`) and
-   `FUN_001E9310` for the field it waits on; then a causal force-test in the
-   style of the earlier `force394` facility — checking the *first* gate in
-   the chain this time.
+1. **Mode-13 locomotion gate** (the playable blocker): the diag119 census
+   is done (action block `+0x1F00..+0x1FFF` frozen, pad analogs ±1.0 in
+   both stick directions) and the `+0x394` force-test failed. Next is
+   **diag120**: enable `GOW2_CALL_PROFILE=5` (add the `SetEnvVar` in
+   `android-runner/native/host/jni_bridge.cpp` — the profiler exists in
+   `overrides/gow2_overrides.cpp` but is never switched on), extend the
+   `GOW2_PEEK` list with the `0x32F300`-region analogs
+   (`32F338,32F33C,32F358,32F35C` + `2D8EC0`), raise/disable the host log
+   cap (the diag119 run's log froze at 08:56:47 on the 10 MB limit), remove
+   `/sdcard/gow2/force394.txt`, rebuild → reinstall → relaunch, then read
+   the `[gow2-prof]` top-25 in mode 13: does `FUN_001E6000` /
+   `FUN_001E5AF0` / `FUN_00278100` / `FUN_002A7728` execute at all, and do
+   the `0x32F300` analogs move with the stick? That decides whether the
+   player update never runs in mode 13 or the analog consumer reads a
+   buffer the host never injects into.
 2. **Present-path performance**: double-buffer frame resources (2 command
    buffers / fences / rings / descriptor pools; wait on the previous frame's
    fence) so the heavy phases are not serialized by `Present()`.
@@ -184,15 +224,23 @@ instrumentation pending cleanup — see "Known issues".)_
 ## Known issues (kendala)
 
 - [!] **Locomotion gate in mode 13** — see M3 above. Everything upstream is
-      proven: pad bits/floats reach the guest, the mode machine advances,
-      the mode-13 branch runs. The scene stays a fixed point under stick
-      input.
+      proven: pad bits/floats reach the guest in both stick directions, the
+      mode machine advances, the mode-13 branch runs. The scene stays a
+      fixed point under stick input, and forcing the player `+0x394` gate
+      (40 applications) moved nothing. The cooked analog floats are never
+      read through an absolute address anywhere in the generated code, so
+      the consumer reads them through a pointer — or reads a buffer the
+      host does not inject into (the `0x32F300` struct written by
+      `FUN_00278100` is the prime suspect).
 - The kit's crash handler can itself abort while dumping the log ring
   (fortify `__memcpy_chk`); two historical crashes (2026-11-11) lost their
   original fault this way. Fix scheduled in TODO 4.
-- The on-device session log (`/sdcard/gow2/logs/gow2.log`) is append-only and
-  the TEMP-DIAG build caps it at 80 MB; delete it before every launch or
-  later samples silently read a capped, stale log.
+- The on-device session log (`/sdcard/gow2/logs/gow2.log`) is append-only;
+  delete it before every launch. It also stops growing mid-run: the
+  2026-11-14 run froze at 08:56:47 when the host reported its 10 MB log
+  limit (`Log size limit (10MB) reached`), file stuck at ~80 MB while the
+  game kept running — raise/disable the cap for long diagnostic runs
+  (diag120) or later samples silently read a capped, stale log.
 - AGP's debug certificate is not stable across build environments, so test
   APKs are re-signed with a local stable keystore before `pm install -r`
   (otherwise `INSTALL_FAILED_UPDATE_INCOMPATIBLE`); after a reinstall the

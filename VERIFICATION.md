@@ -191,3 +191,38 @@ null-RDRAM read and an unbounded loader-poll printer thread), not game
 crashes — with both fixed, the "light state" ran 21+ min with a constant
 thread count. The kit crash handler additionally aborted inside its own
 log-ring dump on two occasions, hiding the original faults (fix scheduled).
+
+## M3 — resume run, diag119 (2026-11-14)
+
+Resumed after the 2026-11-11 stop. Same diag119 build, same device (Galaxy
+S25+, SM-S936U1, Android 15, tailnet 100.88.14.101). Launch 07:29 WIB;
+padScript `20-40:start,50:x,70:x,400-415:select,500-510:x,740-750:start,
+900-1200:lup,1300-1600:ldown,1700-2000:lright` (wall-clock seconds from first
+pad read). Two VM restarts during the run killed the local monitor twice;
+the game on the phone was unaffected and the ADB tunnel was re-established
+each time.
+
+| Check | Evidence | Result |
+| --- | --- | --- |
+| Mode 13 reached | watch `[gow2-watch] mode=13` lines, continuous; `f70=0 f74=0` (SELECT/START latches consumed) | **pass** |
+| Stick up delivery | `padax ax3c=0x3F800000` (+1.0), raw byte `b20=80800080` (stick-Y byte `0x00`) during the 900–1200 s window | **pass** |
+| Stick down delivery | `padax ax3c=0xBF800000` (−1.0), `b20=8080FF80` (stick-Y byte `0xFF`) during the 1300–1600 s window | **pass** |
+| Player action block | `pact0–3` (player `+0x1F00..+0x1FFF`) byte-identical across every sample 08:35–08:56 HP | **frozen (expected — see correction below)** |
+| Player first 256 bytes | `pobj0–3`: no position change; only `+0x08` 0→2, `+0x14` drifting 167→180 over the run, incrementing counter words at `+0xB0/B4/B8` (`0x66113f/6a/97`) | **frozen** |
+| Causal force-test `+0x394` | flag file `/sdcard/gow2/force394.txt` 08:53 HP; watch applied `player+0x394 = 1` 40× across the down/right stick windows | **FAIL — no movement**; screenshot 09:02:24 byte-identical to the 08:47 one (same SHA-256) |
+| Locomotion | Kratos stands on the green hexagon platform, same spot and pose, in every screenshot (08:47, 09:02) | **FAIL — open** |
+| Session log | host `[host] Log size limit (10MB) reached. Suppressing further disk logs.` at 08:56:47; file frozen at 83,886,190 bytes while the game kept running (pid 28889 alive, IOP RPCs flowing) | **limit hit — raise/disable the cap for diag120** |
+
+Corrections recorded from static reads of the generated code (2026-11-14):
+`FUN_001E9310` is an animation/path walker (list at `[player+0x1F10]` +
+eight `func_1E95E8` transforms), not locomotion — with the list head null it
+early-returns, so the frozen action block is expected behaviour, not a
+symptom. `FUN_0025D370` is the mode-13 handler (jump table `0x2FF410` in
+`FUN_0025AD58`); it writes mode = 11 only when `[[0x2D85E4]+0x39C]` is
+non-null. `FUN_001E6000` is the player-entity update (mode 11 → buttons via
+`FUN_001E5AF0`; mode 13 → `FUN_001E9310(a1=0)`; mode 3 → `FUN_001E9BD0`;
+no direct callers — indirect dispatch). The cooked analog floats are never
+read through an absolute address by any generated function; the pad
+processor `FUN_00278100` writes cooked values into the `0x32F300`-region
+struct instead. Next: diag120 with `GOW2_CALL_PROFILE=5` + `GOW2_PEEK` on
+the `0x32F300` analogs + a raised log cap.
